@@ -12,13 +12,17 @@ namespace iDeviceInfo
     /// </summary>
     public sealed class TrayApplicationContext : ApplicationContext
     {
-        private readonly NotifyIcon    _tray;
-        private readonly DeviceWatcher _watcher;
-        private DeviceInfo?            _lastDevice;
-        private DeviceInfoForm?        _popup;
+        private readonly NotifyIcon          _tray;
+        private readonly DeviceWatcher       _watcher;
+        private readonly FloatingCopyButton  _floatingBtn;
+        private DeviceInfo?                  _lastDevice;
+        private DeviceInfoForm?              _popup;
 
         public TrayApplicationContext()
         {
+            // ── Floating Copy All button (shows above taskbar when 3uTools runs)
+            _floatingBtn = new FloatingCopyButton();
+
             // ── Tray icon ─────────────────────────────────────────────────
             _tray = new NotifyIcon
             {
@@ -42,7 +46,11 @@ namespace iDeviceInfo
                 Application.Exit();
             };
 
+            var refreshItem = new ToolStripMenuItem("Refresh Device");
+            refreshItem.Click += (s, e) => _watcher!.Restart();
+
             menu.Items.Add(showItem);
+            menu.Items.Add(refreshItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
             _tray.ContextMenuStrip = menu;
@@ -62,6 +70,7 @@ namespace iDeviceInfo
             _watcher.DeviceConnected += (_, info) =>
             {
                 _lastDevice = info;
+                _floatingBtn.UpdateDevice(info);
                 UpdateTrayIcon(connected: true);
                 showItem.Enabled = true;
                 _tray.Text = $"iDeviceInfo — {info.DeviceName}";
@@ -72,6 +81,7 @@ namespace iDeviceInfo
             _watcher.DeviceDisconnected += (_, _) =>
             {
                 _lastDevice = null;
+                _floatingBtn.UpdateDevice(null);
                 UpdateTrayIcon(connected: false);
                 showItem.Enabled = false;
                 _tray.Text = "iDeviceInfo — No device connected";
@@ -80,7 +90,15 @@ namespace iDeviceInfo
                 ShowBalloon("Device Disconnected", "No iOS device connected.");
             };
 
-            _watcher.Start();
+            // Delay Start() until AFTER Application.Run() has started the message pump.
+            // AMDeviceNotificationSubscribe needs the pump live to deliver callbacks.
+            EventHandler? onIdle = null;
+            onIdle = (s, e) =>
+            {
+                Application.Idle -= onIdle!; // one-shot
+                _watcher.Start();
+            };
+            Application.Idle += onIdle;
 
             // Show a brief startup balloon
             _tray.BalloonTipTitle = "iDeviceInfo";
@@ -187,6 +205,7 @@ namespace iDeviceInfo
             {
                 _watcher.Dispose();
                 _popup?.Dispose();
+                _floatingBtn.Dispose();
                 _tray.Visible = false;
                 _tray.Dispose();
             }
