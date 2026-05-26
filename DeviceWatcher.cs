@@ -1,17 +1,18 @@
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Threading;
-using iDeviceInfo.Native;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows.Forms;
 
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Monitors USB device connect / disconnect events via Apple's MobileDevice.dll.
-    ///
-    /// IMPORTANT: Start() must be called from the UI thread.
-    /// AMDeviceNotificationSubscribe on Windows delivers callbacks via the Windows
-    /// message queue of the subscribing thread. The WinForms message pump (already
-    /// running on the UI thread via Application.Run) handles delivery automatically.
+    /// Reads device info by scraping the 3uTools window every 2 seconds.
+    /// Uses Win32 EnumChildWindows + GetWindowText to collect all visible
+    /// text from 3uTools, then parses out Serial, IMEI, Battery etc.
+    /// No MobileDevice.dll required — zero conflict with 3uTools.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
     {
@@ -22,297 +23,215 @@ namespace iDeviceInfo
 
         // ── State ─────────────────────────────────────────────────────────
 
-        private AMD.DeviceNotificationCallback? _callbackDelegate; // keep alive — GC must not collect
-        private IntPtr                          _subscription;
-        private bool                            _disposed;
+        private System.Windows.Forms.Timer? _timer;
+        private bool   _disposed;
+        private bool   _devicePresent;
+        private string _lastSerial = "";
+
+        // ── Win32 ─────────────────────────────────────────────────────────
+
+        private delegate bool EnumChildProc(IntPtr hwnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(
+            IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(
+            IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
 
         // ── Public API ────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Subscribes to device notifications. MUST be called on the UI thread
-        /// so that the WinForms message pump can deliver the callbacks.
-        /// </summary>
+        /// <summary>Starts the 2-second scrape loop. Call from the UI thread.</summary>
         public void Start()
         {
-            _callbackDelegate = OnDeviceNotification; // root the delegate — GC must not collect this
-
-            int ret = AMD.AMDeviceNotificationSubscribe(
-                _callbackDelegate, 0, 0, IntPtr.Zero, out _subscription);
-
-            // ret != 0 → Apple Mobile Device Service not running (iTunes not installed)
+            _timer = new System.Windows.Forms.Timer { Interval = 2000 };
+            _timer.Tick += (s, e) => Scrape();
+            _timer.Start();
+            Scrape(); // immediate first check
         }
 
-        /// <summary>
-        /// Re-subscribes (unsubscribe + subscribe). Call this if the initial
-        /// subscription missed an already-connected device.
-        /// </summary>
-        public void Restart()
-        {
-            if (_subscription != IntPtr.Zero)
-            {
-                SafeCall(() => AMD.AMDeviceNotificationUnsubscribe(_subscription));
-                _subscription = IntPtr.Zero;
-            }
-            Start();
-        }
+        /// <summary>Force an immediate re-scrape (e.g. from the Refresh menu item).</summary>
+        public void Restart() => Scrape();
 
-        // ── Callback (delivered on the UI thread via WinForms message pump) ──
+        // ── Scraping ──────────────────────────────────────────────────────
 
-        private void OnDeviceNotification(
-            ref AMD.DeviceCallbackInfo info, IntPtr cookie)
+        private void Scrape()
         {
-            if (info.Message == AMD.MSG_CONNECTED)
+            var info = TryScrape3uTools();
+            bool hasDevice = info != null;
+
+            if (hasDevice && (!_devicePresent || info!.SerialNumber != _lastSerial))
             {
-                try
-                {
-                    var deviceInfo = ReadDeviceInfo(info.Device);
-                    DeviceConnected?.Invoke(this, deviceInfo);
-                }
-                catch
-                {
-                    // Don't crash — device may have been unplugged mid-read
-                }
+                // New device or changed device
+                _devicePresent = true;
+                _lastSerial    = info!.SerialNumber;
+                DeviceConnected?.Invoke(this, info);
             }
-            else if (info.Message == AMD.MSG_DISCONNECTED)
+            else if (!hasDevice && _devicePresent)
             {
+                // Device gone (or 3uTools closed)
+                _devicePresent = false;
+                _lastSerial    = "";
                 DeviceDisconnected?.Invoke(this, EventArgs.Empty);
             }
         }
 
-        // ── Device Info Reading ───────────────────────────────────────────
+        /// <summary>
+        /// Returns a populated DeviceInfo if 3uTools is running AND showing a device,
+        /// or null if no device is visible in 3uTools right now.
+        /// </summary>
+        private static DeviceInfo? TryScrape3uTools()
+        {
+            Process[] procs = Process.GetProcessesByName("3uTools");
+            if (procs.Length == 0) return null;
 
-        private static DeviceInfo ReadDeviceInfo(IntPtr device)
+            try
+            {
+                IntPtr hwnd = procs[0].MainWindowHandle;
+                if (hwnd == IntPtr.Zero) return null;
+
+                List<string> texts = CollectWindowText(hwnd);
+                return ParseDeviceInfo(texts);
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                foreach (var p in procs) p.Dispose();
+            }
+        }
+
+        // ── Text collection ───────────────────────────────────────────────
+
+        /// <summary>
+        /// Walks every visible child window of the given HWND and collects
+        /// their text via WM_GETTEXT. Qt widgets respond to this message.
+        /// </summary>
+        private static List<string> CollectWindowText(IntPtr root)
+        {
+            var results = new List<string>();
+
+            EnumChildWindows(root, (hwnd, _) =>
+            {
+                if (!IsWindowVisible(hwnd)) return true;
+
+                int len = GetWindowTextLength(hwnd);
+                if (len <= 0 || len > 1024) return true;
+
+                var sb = new StringBuilder(len + 2);
+                GetWindowText(hwnd, sb, sb.Capacity);
+                string text = sb.ToString().Trim();
+
+                if (!string.IsNullOrWhiteSpace(text))
+                    results.Add(text);
+
+                return true; // continue enumeration
+            }, IntPtr.Zero);
+
+            return results;
+        }
+
+        // ── Parsing ───────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Parses a flat list of text strings (in UI order) from 3uTools
+        /// into a DeviceInfo. Returns null if no device appears to be connected.
+        /// </summary>
+        private static DeviceInfo? ParseDeviceInfo(List<string> texts)
         {
             var info = new DeviceInfo();
 
-            try
+            // ── Pass 1: label → next-value pairing ────────────────────────
+            // 3uTools shows "Serial Number" then the value as the next text node,
+            // or sometimes "Serial Number: XXXX" in one string.
+            for (int i = 0; i < texts.Count; i++)
             {
-                AMD.AMDeviceConnect(device);
-                AMD.AMDeviceValidatePairing(device);
-                AMD.AMDeviceStartSession(device);
+                string raw   = texts[i];
+                string lower = raw.ToLowerInvariant();
 
-                // ── Identity ─────────────────────────────────────────────
-
-                info.DeviceName   = ReadString(device, null, "DeviceName")     ?? "Unknown";
-                info.ProductType  = ReadString(device, null, "ProductType")    ?? "";
-                info.iOSVersion   = ReadString(device, null, "ProductVersion") ?? "";
-                info.UDID         = ReadString(device, null, "UniqueDeviceID") ?? "";
-                info.SerialNumber = ReadString(device, null, "SerialNumber")   ?? "";
-                info.ModelName    = MapProductTypeToName(info.ProductType);
-
-                // IMEI — absent on Wi-Fi-only iPads
-                info.IMEI  = ReadString(device, null, "InternationalMobileEquipmentIdentity")  ?? "N/A";
-                info.IMEI2 = ReadString(device, null, "InternationalMobileEquipmentIdentity2") ?? "";
-
-                // ── Battery ──────────────────────────────────────────────
-
-                const string battDomain = "com.apple.mobile.battery";
-                string? level    = ReadString(device, battDomain, "BatteryCurrentCapacity");
-                string? health   = ReadString(device, battDomain, "BatteryMaximumCapacity");
-                string? charging = ReadString(device, battDomain, "BatteryIsCharging");
-
-                info.BatteryLevel  = level  != null ? $"{level}%"  : "N/A";
-                info.BatteryHealth = health != null ? $"{health}%" : "N/A";
-                info.IsCharging    = charging is "true" or "1";
-
-                // Fallback: try diagnostics relay for battery health
-                if (info.BatteryHealth == "N/A")
+                // Handle "Label: Value" in a single string
+                int colon = raw.IndexOf(':');
+                if (colon > 0 && colon < raw.Length - 1)
                 {
-                    string? relayHealth = TryReadBatteryHealthViaRelay(device);
-                    if (relayHealth != null)
-                        info.BatteryHealth = relayHealth;
+                    string lbl = raw[..colon].Trim().ToLowerInvariant();
+                    string val = raw[(colon + 1)..].Trim();
+                    ApplyLabel(info, lbl, val);
+                    continue;
+                }
+
+                // Handle label on its own line, value on next line
+                if (i + 1 < texts.Count)
+                {
+                    string nextVal = texts[i + 1].Trim();
+                    ApplyLabel(info, lower, nextVal);
                 }
             }
-            catch
+
+            // ── Pass 2: regex fallback on all strings ─────────────────────
+            foreach (string t in texts)
             {
-                // Return whatever fields were populated before the error
-            }
-            finally
-            {
-                SafeCall(() => AMD.AMDeviceStopSession(device));
-                SafeCall(() => AMD.AMDeviceDisconnect(device));
+                // IMEI: exactly 15 digits
+                if (info.IMEI == "N/A" && Regex.IsMatch(t, @"^\d{15}$"))
+                    info.IMEI = t;
+
+                // Serial: 10–15 uppercase alphanumeric chars (no spaces)
+                if (string.IsNullOrEmpty(info.SerialNumber)
+                    && Regex.IsMatch(t, @"^[A-Z0-9]{10,15}$")
+                    && t != info.IMEI)
+                    info.SerialNumber = t;
+
+                // iOS version: e.g. "18.3.1"
+                if (string.IsNullOrEmpty(info.iOSVersion)
+                    && Regex.IsMatch(t, @"^\d{1,2}\.\d{1,2}(\.\d{1,2})?$"))
+                    info.iOSVersion = t;
+
+                // Battery percentage e.g. "84%"
+                if (info.BatteryLevel == "N/A"
+                    && Regex.IsMatch(t, @"^\d{1,3}%$"))
+                    info.BatteryLevel = t;
             }
 
-            return info;
+            // Only return an info object if we found at minimum a serial number
+            // or an IMEI — otherwise 3uTools has no device connected
+            bool hasDevice = !string.IsNullOrEmpty(info.SerialNumber)
+                          || (info.IMEI != "N/A" && !string.IsNullOrEmpty(info.IMEI));
+
+            return hasDevice ? info : null;
         }
 
-        // ── Lockdown value helper ─────────────────────────────────────────
-
-        private static string? ReadString(IntPtr device, string? domain, string key)
+        private static void ApplyLabel(DeviceInfo info, string label, string value)
         {
-            IntPtr domainCF = IntPtr.Zero;
-            IntPtr keyCF    = IntPtr.Zero;
-            IntPtr valueCF  = IntPtr.Zero;
+            if (string.IsNullOrWhiteSpace(value)) return;
 
-            try
-            {
-                if (domain != null)
-                    domainCF = CF.ToCFString(domain);
-                keyCF   = CF.ToCFString(key);
-                valueCF = AMD.AMDeviceCopyValue(device, domainCF, keyCF);
-                return CF.CFValueToString(valueCF);
-            }
-            catch
-            {
-                return null;
-            }
-            finally
-            {
-                if (domainCF != IntPtr.Zero) CF.CFRelease(domainCF);
-                if (keyCF    != IntPtr.Zero) CF.CFRelease(keyCF);
-                if (valueCF  != IntPtr.Zero) CF.CFRelease(valueCF);
-            }
-        }
-
-        // ── Diagnostics Relay (battery health fallback) ───────────────────
-
-        private static string? TryReadBatteryHealthViaRelay(IntPtr device)
-        {
-            IntPtr serviceNameCF = IntPtr.Zero;
-            try
-            {
-                serviceNameCF = CF.ToCFString("com.apple.mobile.diagnostics_relay");
-                int ret = AMD.AMDeviceStartService(device, serviceNameCF,
-                                                   out IntPtr handle, IntPtr.Zero);
-                if (ret != 0 || handle == IntPtr.Zero) return null;
-
-                const string plist =
-                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
-                    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " +
-                    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">" +
-                    "<plist version=\"1.0\"><dict>" +
-                    "<key>Request</key><string>IORegistry</string>" +
-                    "<key>CurrentPlane</key><string>IOService</string>" +
-                    "<key>EntryName</key><string>AppleSmartBattery</string>" +
-                    "</dict></plist>";
-
-                byte[] plistBytes = System.Text.Encoding.UTF8.GetBytes(plist);
-                int networkLen = System.Net.IPAddress.HostToNetworkOrder(plistBytes.Length);
-
-                byte[] lenBuf = new byte[4];
-                System.Buffer.BlockCopy(BitConverter.GetBytes(networkLen), 0, lenBuf, 0, 4);
-
-                SendAll(handle, lenBuf, 4);
-                SendAll(handle, plistBytes, plistBytes.Length);
-
-                byte[] respLenBuf = new byte[4];
-                RecvAll(handle, respLenBuf, 4);
-                int respLen = System.Net.IPAddress.NetworkToHostOrder(
-                    BitConverter.ToInt32(respLenBuf, 0));
-
-                if (respLen <= 0 || respLen > 1_000_000) return null;
-
-                byte[] respBuf = new byte[respLen];
-                RecvAll(handle, respBuf, respLen);
-                return ParseBatteryHealthFromPlist(
-                    System.Text.Encoding.UTF8.GetString(respBuf));
-            }
-            catch
-            {
-                return null;
-            }
-            finally
-            {
-                if (serviceNameCF != IntPtr.Zero) CF.CFRelease(serviceNameCF);
-            }
-        }
-
-        [DllImport("ws2_32.dll", SetLastError = true)]
-        private static extern int send(IntPtr s, byte[] buf, int len, int flags);
-
-        [DllImport("ws2_32.dll", SetLastError = true)]
-        private static extern int recv(IntPtr s, byte[] buf, int len, int flags);
-
-        private static void SendAll(IntPtr sock, byte[] buf, int len)
-        {
-            int offset = 0;
-            while (offset < len)
-            {
-                byte[] segment = new byte[len - offset];
-                Array.Copy(buf, offset, segment, 0, segment.Length);
-                int n = send(sock, segment, segment.Length, 0);
-                if (n <= 0) throw new InvalidOperationException("Send failed");
-                offset += n;
-            }
-        }
-
-        private static void RecvAll(IntPtr sock, byte[] buf, int len)
-        {
-            int got = 0;
-            while (got < len)
-            {
-                int n = recv(sock, buf, len - got, 0);
-                if (n <= 0) throw new InvalidOperationException("Recv failed");
-                got += n;
-            }
-        }
-
-        private static string? ParseBatteryHealthFromPlist(string plist)
-        {
-            long max    = ExtractIntFromPlist(plist, "MaxCapacity");
-            long design = ExtractIntFromPlist(plist, "DesignCapacity");
-            if (max <= 0 || design <= 0) return null;
-            return $"{Math.Round((double)max / design * 100.0, 1)}%";
-        }
-
-        private static long ExtractIntFromPlist(string plist, string key)
-        {
-            string marker = $"<key>{key}</key>";
-            int idx = plist.IndexOf(marker, StringComparison.Ordinal);
-            if (idx < 0) return -1;
-            int start = plist.IndexOf("<integer>", idx + marker.Length, StringComparison.Ordinal);
-            if (start < 0) return -1;
-            start += "<integer>".Length;
-            int end = plist.IndexOf("</integer>", start, StringComparison.Ordinal);
-            if (end < 0) return -1;
-            return long.TryParse(plist[start..end].Trim(), out long val) ? val : -1;
-        }
-
-        // ── ProductType → friendly name ───────────────────────────────────
-
-        private static string MapProductTypeToName(string productType) =>
-            productType switch
-            {
-                "iPhone17,1" => "iPhone 16 Pro Max",
-                "iPhone17,2" => "iPhone 16 Pro",
-                "iPhone17,3" => "iPhone 16 Plus",
-                "iPhone17,4" => "iPhone 16",
-                "iPhone16,1" => "iPhone 15",
-                "iPhone16,2" => "iPhone 15 Plus",
-                "iPhone16,3" => "iPhone 15 Pro",
-                "iPhone16,4" => "iPhone 15 Pro Max",
-                "iPhone15,2" => "iPhone 14 Pro",
-                "iPhone15,3" => "iPhone 14 Pro Max",
-                "iPhone14,7" => "iPhone 14",
-                "iPhone14,8" => "iPhone 14 Plus",
-                "iPhone14,4" => "iPhone 13 mini",
-                "iPhone14,5" => "iPhone 13",
-                "iPhone14,2" => "iPhone 13 Pro",
-                "iPhone14,3" => "iPhone 13 Pro Max",
-                "iPhone13,1" => "iPhone 12 mini",
-                "iPhone13,2" => "iPhone 12",
-                "iPhone13,3" => "iPhone 12 Pro",
-                "iPhone13,4" => "iPhone 12 Pro Max",
-                "iPhone12,1" => "iPhone 11",
-                "iPhone12,3" => "iPhone 11 Pro",
-                "iPhone12,5" => "iPhone 11 Pro Max",
-                "iPhone14,6" => "iPhone SE (3rd gen)",
-                "iPhone12,8" => "iPhone SE (2nd gen)",
-                "iPhone8,4"  => "iPhone SE (1st gen)",
-                "iPad13,18"  => "iPad (10th gen)",
-                "iPad13,19"  => "iPad (10th gen)",
-                "iPad14,1"   => "iPad mini (6th gen)",
-                "iPad14,2"   => "iPad mini (6th gen)",
-                "iPad14,3"   => "iPad Pro 11\" (4th gen)",
-                "iPad14,4"   => "iPad Pro 11\" (4th gen)",
-                "iPad14,5"   => "iPad Pro 12.9\" (6th gen)",
-                "iPad14,6"   => "iPad Pro 12.9\" (6th gen)",
-                _            => productType
-            };
-
-        private static void SafeCall(Action action)
-        {
-            try { action(); } catch { }
+            if (label.Contains("serial"))
+                info.SerialNumber = value;
+            else if (label.Contains("imei2") || label.Contains("imei 2"))
+                info.IMEI2 = value;
+            else if (label.Contains("imei"))
+                info.IMEI = value;
+            else if (label.Contains("battery life") || label.Contains("battery health")
+                  || label.Contains("maximum capacity"))
+                info.BatteryHealth = value;
+            else if (label.Contains("battery"))
+                info.BatteryLevel = value;
+            else if (label.Contains("device name") || label.Contains("iphone name")
+                  || label.Contains("ipad name")   || label.Contains("item title")
+                  || label.Contains("phone name"))
+                info.DeviceName = value;
+            else if (label.Contains("ios version") || label.Contains("system version")
+                  || label.Contains("software version"))
+                info.iOSVersion = value;
+            else if (label.Contains("model name") || label.Contains("device model"))
+                info.ModelName = value;
         }
 
         // ── IDisposable ───────────────────────────────────────────────────
@@ -321,8 +240,8 @@ namespace iDeviceInfo
         {
             if (_disposed) return;
             _disposed = true;
-            if (_subscription != IntPtr.Zero)
-                SafeCall(() => AMD.AMDeviceNotificationUnsubscribe(_subscription));
+            _timer?.Stop();
+            _timer?.Dispose();
         }
     }
 }
