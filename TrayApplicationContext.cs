@@ -49,8 +49,12 @@ namespace iDeviceInfo
             var refreshItem = new ToolStripMenuItem("Refresh Device");
             refreshItem.Click += (s, e) => _watcher!.Restart();
 
+            var debugItem = new ToolStripMenuItem("Debug: Dump 3uTools Text");
+            debugItem.Click += (_, _) => DeviceWatcher.DumpToFile();
+
             menu.Items.Add(showItem);
             menu.Items.Add(refreshItem);
+            menu.Items.Add(debugItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
             _tray.ContextMenuStrip = menu;
