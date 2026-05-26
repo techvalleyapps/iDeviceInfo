@@ -185,90 +185,87 @@ namespace iDeviceInfo
         // Each regex targets the *direct* JSON string value  "key":"value"
         // (the key must end with :" to avoid matching nested object keys).
 
+        // ── JSON field regexes ────────────────────────────────────────────
+
+        private static readonly Regex ReCheckDate   = new(@"""checkDate""\s*:\s*""(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})""", RegexOptions.Compiled);
         private static readonly Regex ReDeviceName  = new(@"""deviceName""\s*:\s*""([^""]{1,120})""",   RegexOptions.Compiled);
         private static readonly Regex ReImei        = new(@"""imei""\s*:\s*""(\d{14,16})""",             RegexOptions.Compiled);
         private static readonly Regex ReImei2       = new(@"""imei2""\s*:\s*""(\d{14,16})""",            RegexOptions.Compiled);
-        // "serial":"CF9G2X7GK6"  — but NOT "key_serial":{...}  (the :" guard works)
         private static readonly Regex ReSerial      = new(@"(?<![_a-z])""serial""\s*:\s*""([A-Z0-9]{6,20})""", RegexOptions.Compiled);
         private static readonly Regex ReBatLife     = new(@"""batLife""\s*:\s*""(\d{1,3})""",            RegexOptions.Compiled);
         private static readonly Regex ReProductType = new(@"""productType""\s*:\s*""([^""]{1,60})""",    RegexOptions.Compiled);
         private static readonly Regex ReBuildVer    = new(@"""buildver""\s*:\s*""([A-Z0-9]{3,10})""",    RegexOptions.Compiled);
-        // Model from key_model.read
         private static readonly Regex ReModelRead   = new(@"""key_model""\s*:\s*\{[^}]*?""read""\s*:\s*""([^""]{1,80})""", RegexOptions.Compiled);
-        // Also accept deviceName as model name when no key_model present
-        private static readonly Regex ReColor       = new(@"""color""\s*:\s*""([^""]{1,80})""",          RegexOptions.Compiled);
 
         private static DeviceInfo? ParseDeviceInfo(List<string> texts)
+        {
+            // LevelDB accumulates all historical scan records.
+            // Each "BasicsData" blob carries a "checkDate" timestamp.
+            // We find the string with the LATEST checkDate — that is the device
+            // currently shown in 3uTools — and extract fields from it alone.
+            // This prevents stale data from an earlier device contaminating results.
+
+            string? latestBlob  = null;
+            DateTime latestDate = DateTime.MinValue;
+
+            foreach (string t in texts)
+            {
+                var m = ReCheckDate.Match(t);
+                if (!m.Success) continue;
+
+                if (DateTime.TryParseExact(
+                        m.Groups[1].Value,
+                        "MM/dd/yyyy HH:mm:ss",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None,
+                        out DateTime dt)
+                    && dt > latestDate)
+                {
+                    latestDate  = dt;
+                    latestBlob  = t;
+                }
+            }
+
+            // Extract from the freshest blob; fall back to scanning everything
+            return ExtractFields(latestBlob != null
+                ? new List<string> { latestBlob }
+                : texts);
+        }
+
+        private static DeviceInfo? ExtractFields(List<string> texts)
         {
             var info = new DeviceInfo();
 
             foreach (string t in texts)
             {
-                // Only bother scanning strings that look like 3uTools JSON
                 if (!t.Contains('"')) continue;
-
                 Match m;
 
                 if (info.DeviceName == "Unknown Device")
-                {
-                    m = ReDeviceName.Match(t);
-                    if (m.Success) info.DeviceName = m.Groups[1].Value.Trim();
-                }
+                { m = ReDeviceName.Match(t); if (m.Success) info.DeviceName = m.Groups[1].Value.Trim(); }
 
                 if (info.IMEI == "N/A")
-                {
-                    m = ReImei.Match(t);
-                    if (m.Success) info.IMEI = m.Groups[1].Value;
-                }
+                { m = ReImei.Match(t); if (m.Success) info.IMEI = m.Groups[1].Value; }
 
                 if (string.IsNullOrEmpty(info.IMEI2))
-                {
-                    m = ReImei2.Match(t);
-                    if (m.Success) info.IMEI2 = m.Groups[1].Value;
-                }
+                { m = ReImei2.Match(t); if (m.Success) info.IMEI2 = m.Groups[1].Value; }
 
                 if (string.IsNullOrEmpty(info.SerialNumber))
-                {
-                    m = ReSerial.Match(t);
-                    if (m.Success) info.SerialNumber = m.Groups[1].Value;
-                }
+                { m = ReSerial.Match(t); if (m.Success) info.SerialNumber = m.Groups[1].Value; }
 
                 if (info.BatteryHealth == "N/A")
-                {
-                    m = ReBatLife.Match(t);
-                    if (m.Success) info.BatteryHealth = m.Groups[1].Value + "%";
-                }
+                { m = ReBatLife.Match(t); if (m.Success) info.BatteryHealth = m.Groups[1].Value + "%"; }
 
                 if (string.IsNullOrEmpty(info.ProductType))
-                {
-                    m = ReProductType.Match(t);
-                    if (m.Success) info.ProductType = m.Groups[1].Value;
-                }
+                { m = ReProductType.Match(t); if (m.Success) info.ProductType = m.Groups[1].Value; }
 
                 if (string.IsNullOrEmpty(info.iOSVersion))
-                {
-                    m = ReBuildVer.Match(t);
-                    if (m.Success) info.iOSVersion = m.Groups[1].Value;
-                }
+                { m = ReBuildVer.Match(t); if (m.Success) info.iOSVersion = m.Groups[1].Value; }
 
                 if (string.IsNullOrEmpty(info.ModelName))
-                {
-                    m = ReModelRead.Match(t);
-                    if (m.Success) info.ModelName = m.Groups[1].Value;
-                }
-
-                // Colour stored in ProductType's sibling field — use as subtitle hint
-                if (string.IsNullOrEmpty(info.ProductType))
-                {
-                    m = ReColor.Match(t);
-                    if (m.Success && !m.Groups[1].Value.StartsWith("Front"))
-                    {
-                        // only for strings like "Natural Titanium", not "Front Black\nRear …"
-                    }
-                }
+                { m = ReModelRead.Match(t); if (m.Success) info.ModelName = m.Groups[1].Value; }
             }
 
-            // Fall back: if ModelName empty, use DeviceName
             if (string.IsNullOrEmpty(info.ModelName) && info.DeviceName != "Unknown Device")
                 info.ModelName = info.DeviceName;
 
@@ -298,6 +295,24 @@ namespace iDeviceInfo
             lines.Add("");
             for (int i = 0; i < texts.Count; i++)
                 lines.Add($"[{i,4}] {texts[i]}");
+
+            // Show which blob was chosen as "latest"
+            lines.Add("");
+            lines.Add("=== Latest BasicsData blob selected ===");
+            string? latestBlob = null;
+            DateTime latestDate = DateTime.MinValue;
+            foreach (string t in texts)
+            {
+                var m = ReCheckDate.Match(t);
+                if (m.Success && DateTime.TryParseExact(m.Groups[1].Value,
+                    "MM/dd/yyyy HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out DateTime dt) && dt > latestDate)
+                { latestDate = dt; latestBlob = t; }
+            }
+            lines.Add(latestBlob != null
+                ? $"checkDate: {latestDate:MM/dd/yyyy HH:mm:ss}  (first 200 chars: {latestBlob[..Math.Min(200, latestBlob.Length)]})"
+                : "(none found — will scan all strings)");
 
             var parsed = ParseDeviceInfo(texts);
             lines.Add("");
