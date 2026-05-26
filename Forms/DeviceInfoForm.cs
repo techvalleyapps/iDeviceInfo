@@ -33,11 +33,12 @@ namespace iDeviceInfo.Forms
         private static readonly Color AccentColor  = Color.FromArgb(10,  132, 255); // iOS blue
         private static readonly Color BorderColor  = Color.FromArgb(60,  60,  60);
 
-        private static readonly Font TitleFont  = new("Segoe UI Semibold", 11f, FontStyle.Regular);
-        private static readonly Font SubFont    = new("Segoe UI",          8.5f, FontStyle.Regular);
-        private static readonly Font LabelFont  = new("Segoe UI",          9f,  FontStyle.Regular);
-        private static readonly Font ValueFont  = new("Segoe UI",          9f,  FontStyle.Bold);
-        private static readonly Font BtnFont    = new("Segoe UI",          8f,  FontStyle.Regular);
+        // Instance fonts — created per-popup so Dispose() can safely clean them up
+        private readonly Font TitleFont  = new("Segoe UI Semibold", 11f, FontStyle.Regular);
+        private readonly Font SubFont    = new("Segoe UI",          8.5f, FontStyle.Regular);
+        private readonly Font LabelFont  = new("Segoe UI",          9f,  FontStyle.Regular);
+        private readonly Font ValueFont  = new("Segoe UI",          9f,  FontStyle.Bold);
+        private readonly Font BtnFont    = new("Segoe UI",          8f,  FontStyle.Regular);
 
         public DeviceInfoForm(DeviceInfo info)
         {
@@ -251,7 +252,7 @@ namespace iDeviceInfo.Forms
 
         // ── UI Helpers ────────────────────────────────────────────────────
 
-        private static Button MakeButton(string text, Point location, Size size)
+        private Button MakeButton(string text, Point location, Size size)
         {
             var btn = new Button
             {
