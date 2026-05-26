@@ -10,12 +10,12 @@ using System.Windows.Forms;
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Reads device info by scraping the 3uTools window every 2 seconds.
+    /// Reads device info by scraping 3uTools every 2 seconds.
     ///
-    /// Strategy:
-    ///   IAccessible (oleacc.dll) — walks Qt's logical accessibility tree.
-    ///   Qt 5 on Windows exposes all label/value text through MSAA even though
-    ///   it has no real Win32 child HWNDs (hence WM_GETTEXT returns nothing).
+    /// 3uTools renders its UI inside QtWebEngine (embedded Chromium), so neither
+    /// WM_GETTEXT nor IAccessible expose any text.  Instead we read the LevelDB
+    /// files that QtWebEngine writes to LocalAppData — device info flows through
+    /// localStorage/sessionStorage in real time.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
     {
@@ -31,60 +31,6 @@ namespace iDeviceInfo
         private bool   _devicePresent;
         private string _lastSerial = "";
         private bool   _scraping;
-
-        // ── IAccessible (MSAA) COM interface — InterfaceIsIDispatch lets us
-        //   declare only the methods we need; Qt's IAccessible uses IDispatch. ──
-
-        [ComImport]
-        [Guid("618736e0-3c3d-11cf-810c-00aa00389b71")]
-        [InterfaceType(ComInterfaceType.InterfaceIsIDispatch)]
-        private interface IAccessible
-        {
-            [DispId(-5001)] int accChildCount { get; }
-
-            [DispId(-5002)]
-            [return: MarshalAs(UnmanagedType.Struct)]
-            object? get_accChild([In, MarshalAs(UnmanagedType.Struct)] object varChild);
-
-            [DispId(-5003)]
-            [return: MarshalAs(UnmanagedType.BStr)]
-            string? get_accName([In, MarshalAs(UnmanagedType.Struct)] object varChild);
-
-            [DispId(-5004)]
-            [return: MarshalAs(UnmanagedType.BStr)]
-            string? get_accValue([In, MarshalAs(UnmanagedType.Struct)] object varChild);
-        }
-
-        [DllImport("oleacc.dll")]
-        private static extern int AccessibleObjectFromWindow(
-            IntPtr hwnd,
-            uint   dwObjectId,
-            ref Guid riid,
-            [MarshalAs(UnmanagedType.IUnknown)] out object ppvObject);
-
-        private static readonly Guid IID_IAccessible =
-            new Guid("618736e0-3c3d-11cf-810c-00aa00389b71");
-
-        private const uint OBJID_WINDOW = 0x00000000;
-        private const int  CHILDID_SELF = 0;
-
-        // ── Win32 — kept as extra fallback ────────────────────────────────
-
-        private delegate bool EnumChildProc(IntPtr hwnd, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumChildWindows(
-            IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowText(
-            IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetWindowTextLength(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindowVisible(IntPtr hWnd);
 
         // ── Public API ────────────────────────────────────────────────────
 
@@ -133,123 +79,124 @@ namespace iDeviceInfo
 
         private static DeviceInfo? TryScrape3uTools()
         {
+            // 3uTools must be running
             Process[] procs = Process.GetProcessesByName("3uTools");
-            if (procs.Length == 0) return null;
+            bool running = procs.Length > 0;
+            foreach (var p in procs) p.Dispose();
+            if (!running) return null;
 
-            try
-            {
-                IntPtr hwnd = procs[0].MainWindowHandle;
-                if (hwnd == IntPtr.Zero) return null;
-
-                // Primary: IAccessible tree (reads Qt logical widget hierarchy)
-                List<string> texts = CollectViaIAccessible(hwnd);
-
-                // Fallback: WM_GETTEXT for any real child HWNDs
-                foreach (var t in CollectWindowText(hwnd))
-                    if (!texts.Contains(t, StringComparer.Ordinal))
-                        texts.Add(t);
-
-                return ParseDeviceInfo(texts);
-            }
-            catch
-            {
-                return null;
-            }
-            finally
-            {
-                foreach (var p in procs) p.Dispose();
-            }
+            // Read device info from QtWebEngine LevelDB storage files
+            List<string> texts = CollectFromLocalStorage();
+            return ParseDeviceInfo(texts);
         }
 
-        // ── IAccessible collection ────────────────────────────────────────
+        // ── LevelDB string extraction ─────────────────────────────────────
 
-        private static List<string> CollectViaIAccessible(IntPtr hwnd)
+        private static readonly string s_storageRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "3uTools", "QtWebEngine", "Default");
+
+        /// <summary>
+        /// Reads all LevelDB .log and .ldb files from 3uTools' QtWebEngine storage
+        /// and extracts printable strings (both ASCII and UTF-16 LE).
+        /// </summary>
+        private static List<string> CollectFromLocalStorage()
         {
             var results = new List<string>();
             var seen    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            try
+            string[] dirs =
             {
-                Guid iid = IID_IAccessible;
-                if (AccessibleObjectFromWindow(hwnd, OBJID_WINDOW, ref iid, out object obj) != 0)
-                    return results;
+                Path.Combine(s_storageRoot, "Session Storage"),
+                Path.Combine(s_storageRoot, "Local Storage", "leveldb"),
+            };
 
-                if (obj is IAccessible root)
-                    WalkAccessible(root, results, seen, depth: 0);
+            foreach (string dir in dirs)
+            {
+                if (!Directory.Exists(dir)) continue;
+
+                var files = new List<string>();
+                try { files.AddRange(Directory.GetFiles(dir, "*.log")); } catch { }
+                try { files.AddRange(Directory.GetFiles(dir, "*.ldb")); } catch { }
+
+                foreach (string file in files)
+                {
+                    // Skip tiny/empty bookkeeping files
+                    try { if (new FileInfo(file).Length < 10) continue; } catch { continue; }
+
+                    byte[]? data = TryReadShared(file);
+                    if (data == null) continue;
+
+                    foreach (string s in ExtractAsciiStrings(data, minLen: 5))
+                        if (seen.Add(s)) results.Add(s);
+
+                    foreach (string s in ExtractUtf16Strings(data, minLen: 5))
+                        if (seen.Add(s)) results.Add(s);
+                }
             }
-            catch { }
 
             return results;
         }
 
-        private static void WalkAccessible(
-            IAccessible acc,
-            List<string> results,
-            HashSet<string> seen,
-            int depth)
+        /// <summary>
+        /// Reads a file that may be open/locked by 3uTools using FileShare.ReadWrite.
+        /// Returns null if the file cannot be read.
+        /// </summary>
+        private static byte[]? TryReadShared(string path)
         {
-            if (depth > 25 || results.Count >= 800) return;
-
-            // Read Name and Value for this node (CHILDID_SELF = 0)
             try
             {
-                string? name = acc.get_accName(CHILDID_SELF);
-                if (!string.IsNullOrWhiteSpace(name) && name.Length <= 512)
-                {
-                    string t = name.Trim();
-                    if (seen.Add(t)) results.Add(t);
-                }
-
-                string? val = acc.get_accValue(CHILDID_SELF);
-                if (!string.IsNullOrWhiteSpace(val) && val.Length <= 512)
-                {
-                    string t = val.Trim();
-                    if (seen.Add(t)) results.Add(t);
-                }
+                using var fs = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var buf = new byte[fs.Length];
+                fs.Read(buf, 0, buf.Length);
+                return buf;
             }
-            catch { }
-
-            // Recurse into children
-            int childCount;
-            try { childCount = acc.accChildCount; }
-            catch { return; }
-
-            for (int i = 1; i <= childCount && results.Count < 800; i++)
-            {
-                try
-                {
-                    object? child = acc.get_accChild(i);
-                    if (child is IAccessible childAcc)
-                        WalkAccessible(childAcc, results, seen, depth + 1);
-                    // child can also be an int (simple child ID within parent) — skip those
-                }
-                catch { }
-            }
+            catch { return null; }
         }
 
-        // ── WM_GETTEXT fallback ───────────────────────────────────────────
-
-        private static List<string> CollectWindowText(IntPtr root)
+        /// <summary>Extracts contiguous printable ASCII runs of at least minLen chars.</summary>
+        private static IEnumerable<string> ExtractAsciiStrings(byte[] data, int minLen)
         {
-            var results = new List<string>();
-
-            EnumChildWindows(root, (hwnd, _) =>
+            var sb = new StringBuilder();
+            foreach (byte b in data)
             {
-                if (!IsWindowVisible(hwnd)) return true;
+                if (b >= 0x20 && b < 0x7F)
+                    sb.Append((char)b);
+                else
+                {
+                    if (sb.Length >= minLen) yield return sb.ToString();
+                    sb.Clear();
+                }
+            }
+            if (sb.Length >= minLen) yield return sb.ToString();
+        }
 
-                int len = GetWindowTextLength(hwnd);
-                if (len <= 0 || len > 2048) return true;
-
-                var sb = new StringBuilder(len + 2);
-                GetWindowText(hwnd, sb, sb.Capacity);
-                string text = sb.ToString().Trim();
-                if (!string.IsNullOrWhiteSpace(text))
-                    results.Add(text);
-
-                return true;
-            }, IntPtr.Zero);
-
-            return results;
+        /// <summary>
+        /// Extracts UTF-16 LE strings (each char = lo byte printable ASCII + hi byte 0x00).
+        /// Chromium's V8 stores many JS strings in UTF-16 LE inside LevelDB.
+        /// </summary>
+        private static IEnumerable<string> ExtractUtf16Strings(byte[] data, int minLen)
+        {
+            var sb = new StringBuilder();
+            int i = 0;
+            while (i + 1 < data.Length)
+            {
+                byte lo = data[i];
+                byte hi = data[i + 1];
+                if (lo >= 0x20 && lo < 0x7F && hi == 0x00)
+                {
+                    sb.Append((char)lo);
+                    i += 2;
+                }
+                else
+                {
+                    if (sb.Length >= minLen) yield return sb.ToString();
+                    sb.Clear();
+                    i++;
+                }
+            }
+            if (sb.Length >= minLen) yield return sb.ToString();
         }
 
         // ── Parsing ───────────────────────────────────────────────────────
@@ -258,6 +205,7 @@ namespace iDeviceInfo
         {
             var info = new DeviceInfo();
 
+            // Pass 1: label → value pairs
             for (int i = 0; i < texts.Count; i++)
             {
                 string raw   = texts[i];
@@ -274,6 +222,7 @@ namespace iDeviceInfo
                     ApplyLabel(info, lower, texts[i + 1].Trim());
             }
 
+            // Pass 2: regex fallback
             foreach (string t in texts)
             {
                 if (info.IMEI == "N/A" && Regex.IsMatch(t, @"^\d{15}$"))
@@ -329,113 +278,81 @@ namespace iDeviceInfo
         public static void DumpToFile()
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
-            if (procs.Length == 0)
+            bool running = procs.Length > 0;
+            foreach (var p in procs) p.Dispose();
+
+            var lines = new List<string>
             {
-                MessageBox.Show(
-                    "3uTools is not running.\n\nOpen 3uTools with an iPhone connected, then try again.",
-                    "iDeviceInfo — Debug", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
+                $"3uTools running: {running}",
+                ""
+            };
+
+            // LevelDB strings
+            lines.Add("=== Strings extracted from QtWebEngine LevelDB ===");
+            var lsTexts = CollectFromLocalStorage();
+            lines.Add($"Total unique strings: {lsTexts.Count}");
+            lines.Add("");
+            for (int i = 0; i < lsTexts.Count; i++)
+                lines.Add($"[{i,4}] {lsTexts[i]}");
+
+            // Parser result
+            var parsed = ParseDeviceInfo(lsTexts);
+            lines.Add("");
+            lines.Add("=== Parser result ===");
+            if (parsed == null)
+            {
+                lines.Add("No device detected — Serial/IMEI not found in LevelDB strings.");
+                lines.Add("Share this file to tune the parser.");
+            }
+            else
+            {
+                lines.Add($"DeviceName:    {parsed.DeviceName}");
+                lines.Add($"ModelName:     {parsed.ModelName}");
+                lines.Add($"iOSVersion:    {parsed.iOSVersion}");
+                lines.Add($"SerialNumber:  {parsed.SerialNumber}");
+                lines.Add($"IMEI:          {parsed.IMEI}");
+                lines.Add($"IMEI2:         {parsed.IMEI2}");
+                lines.Add($"BatteryLevel:  {parsed.BatteryLevel}");
+                lines.Add($"BatteryHealth: {parsed.BatteryHealth}");
+            }
+
+            // File inventory
+            lines.Add("");
+            lines.Add("=== LevelDB file inventory ===");
+            string[] dirs =
+            {
+                Path.Combine(s_storageRoot, "Session Storage"),
+                Path.Combine(s_storageRoot, "Local Storage", "leveldb"),
+            };
+            foreach (string dir in dirs)
+            {
+                lines.Add($"DIR: {dir}");
+                if (!Directory.Exists(dir)) { lines.Add("  (not found)"); continue; }
+                try
+                {
+                    foreach (var f in Directory.GetFiles(dir))
+                    {
+                        var fi = new FileInfo(f);
+                        lines.Add($"  {fi.Name,-40} {fi.Length,8} bytes  {fi.LastWriteTime:HH:mm:ss}");
+                    }
+                }
+                catch (Exception ex) { lines.Add($"  error: {ex.Message}"); }
             }
 
             try
             {
-                IntPtr hwnd = procs[0].MainWindowHandle;
-                if (hwnd == IntPtr.Zero)
-                {
-                    MessageBox.Show("3uTools window handle is zero.",
-                        "iDeviceInfo — Debug", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                var lines = new List<string>
-                {
-                    $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                    $"3uTools HWND: 0x{hwnd:X}",
-                    ""
-                };
-
-                // IAccessible
-                lines.Add("=== IAccessible (MSAA) ===");
-                var accTexts = CollectViaIAccessible(hwnd);
-                lines.Add($"Items: {accTexts.Count}");
-                lines.Add("");
-                for (int i = 0; i < accTexts.Count; i++)
-                    lines.Add($"[{i,3}] {accTexts[i]}");
-
-                // WM_GETTEXT
-                lines.Add("");
-                lines.Add("=== WM_GETTEXT Win32 ===");
-                var wmTexts = CollectWindowText(hwnd);
-                lines.Add($"Items: {wmTexts.Count}");
-                lines.Add("");
-                for (int i = 0; i < wmTexts.Count; i++)
-                    lines.Add($"[{i,3}] {wmTexts[i]}");
-
-                // AppData search
-                lines.Add("");
-                lines.Add("=== 3uTools AppData files ===");
-                foreach (var dir in new[]
-                {
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),      "3uTools"),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "3uTools"),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),      "3uTools9"),
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "3uTools9"),
-                    @"C:\Program Files\3uTools9\Data",
-                    @"C:\Program Files\3uTools9\Resources",
-                })
-                {
-                    if (!Directory.Exists(dir)) continue;
-                    lines.Add($"DIR: {dir}");
-                    try
-                    {
-                        foreach (var f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
-                            lines.Add($"  {f}  ({new FileInfo(f).Length} bytes, modified {File.GetLastWriteTime(f):yyyy-MM-dd HH:mm})");
-                    }
-                    catch (Exception ex) { lines.Add($"  (error: {ex.Message})"); }
-                }
-
-                // Parser result
-                var combined = new List<string>(accTexts);
-                foreach (var t in wmTexts) if (!combined.Contains(t)) combined.Add(t);
-                var parsed = ParseDeviceInfo(combined);
-
-                lines.Add("");
-                lines.Add("=== Parser result ===");
-                if (parsed == null)
-                {
-                    lines.Add("No device detected — Serial/IMEI not found.");
-                    lines.Add("Share this file to fix the parser.");
-                }
-                else
-                {
-                    lines.Add($"DeviceName:    {parsed.DeviceName}");
-                    lines.Add($"ModelName:     {parsed.ModelName}");
-                    lines.Add($"iOSVersion:    {parsed.iOSVersion}");
-                    lines.Add($"SerialNumber:  {parsed.SerialNumber}");
-                    lines.Add($"IMEI:          {parsed.IMEI}");
-                    lines.Add($"IMEI2:         {parsed.IMEI2}");
-                    lines.Add($"BatteryLevel:  {parsed.BatteryLevel}");
-                    lines.Add($"BatteryHealth: {parsed.BatteryHealth}");
-                }
-
                 string path = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
                     "iDeviceInfo_debug.txt");
                 File.WriteAllLines(path, lines, Encoding.UTF8);
-
                 Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"")
-                {
-                    UseShellExecute = true
-                });
+                    { UseShellExecute = true });
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Debug dump failed:\n\n{ex.Message}",
-                    "iDeviceInfo — Debug", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally
-            {
-                foreach (var p in procs) p.Dispose();
+                MessageBox.Show($"Could not save debug file:\n{ex.Message}",
+                    "iDeviceInfo", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
