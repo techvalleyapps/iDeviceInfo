@@ -27,10 +27,5 @@
     <Copyright>2025</Copyright>
   </PropertyGroup>
 
-  <!-- UIAutomation assemblies (part of Windows Desktop runtime) -->
-  <ItemGroup>
-    <Reference Include="UIAutomationClient" />
-    <Reference Include="UIAutomationTypes" />
-  </ItemGroup>
 
 </Project>

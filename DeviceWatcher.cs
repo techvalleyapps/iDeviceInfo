@@ -5,18 +5,14 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Windows.Automation;
 using System.Windows.Forms;
 
 namespace iDeviceInfo
 {
     /// <summary>
     /// Reads device info by scraping the 3uTools window every 2 seconds.
-    ///
-    /// Strategy (in order):
-    ///   1. UIAutomation  — reads Qt accessibility tree (Name + ValuePattern)
-    ///   2. WM_GETTEXT    — fallback for any plain Win32 child windows
-    ///
+    /// Uses Win32 EnumChildWindows + GetWindowText to collect all visible
+    /// text from 3uTools child windows, then parses out device fields.
     /// No MobileDevice.dll required — zero conflict with 3uTools.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
@@ -32,7 +28,7 @@ namespace iDeviceInfo
         private bool   _disposed;
         private bool   _devicePresent;
         private string _lastSerial = "";
-        private bool   _scraping;          // re-entrancy guard
+        private bool   _scraping;
 
         // ── Win32 ─────────────────────────────────────────────────────────
 
@@ -60,10 +56,10 @@ namespace iDeviceInfo
             _timer = new System.Windows.Forms.Timer { Interval = 2000 };
             _timer.Tick += async (s, e) => await ScrapeAsync();
             _timer.Start();
-            _ = ScrapeAsync(); // immediate first check
+            _ = ScrapeAsync();
         }
 
-        /// <summary>Force an immediate re-scrape (e.g. from the Refresh menu item).</summary>
+        /// <summary>Force an immediate re-scrape.</summary>
         public void Restart() => _ = ScrapeAsync();
 
         // ── Scraping ──────────────────────────────────────────────────────
@@ -76,7 +72,6 @@ namespace iDeviceInfo
             DeviceInfo? info;
             try
             {
-                // UIAutomation can be slow — run off the UI thread
                 info = await System.Threading.Tasks.Task.Run(() => TryScrape3uTools());
             }
             finally
@@ -84,7 +79,6 @@ namespace iDeviceInfo
                 _scraping = false;
             }
 
-            // Back on UI thread (WinForms SynchronizationContext)
             bool hasDevice = info != null;
 
             if (hasDevice && (!_devicePresent || info!.SerialNumber != _lastSerial))
@@ -101,10 +95,6 @@ namespace iDeviceInfo
             }
         }
 
-        /// <summary>
-        /// Returns a populated DeviceInfo if 3uTools is running AND showing a device,
-        /// or null if no device is visible in 3uTools right now.
-        /// </summary>
         private static DeviceInfo? TryScrape3uTools()
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
@@ -115,14 +105,7 @@ namespace iDeviceInfo
                 IntPtr hwnd = procs[0].MainWindowHandle;
                 if (hwnd == IntPtr.Zero) return null;
 
-                // Primary: UIAutomation (reads Qt accessibility layer)
-                List<string> texts = CollectViaUIAutomation(hwnd);
-
-                // Fallback: WM_GETTEXT — merge in anything UIAutomation missed
-                foreach (var t in CollectWindowText(hwnd))
-                    if (!texts.Contains(t, StringComparer.Ordinal))
-                        texts.Add(t);
-
+                List<string> texts = CollectWindowText(hwnd);
                 return ParseDeviceInfo(texts);
             }
             catch
@@ -135,74 +118,12 @@ namespace iDeviceInfo
             }
         }
 
-        // ── UIAutomation collection ────────────────────────────────────────
+        // ── Text collection ───────────────────────────────────────────────
 
         /// <summary>
-        /// Walks the UIAutomation accessibility tree of the given window handle.
-        /// Qt 5 exposes all label/value text through IAccessible / UIA Name + ValuePattern.
+        /// Walks every visible child window and collects text via WM_GETTEXT.
+        /// Also collects text from windows up to 2048 chars (increased limit).
         /// </summary>
-        private static List<string> CollectViaUIAutomation(IntPtr hwnd)
-        {
-            var results = new List<string>();
-            var seen    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            try
-            {
-                var root = AutomationElement.FromHandle(hwnd);
-                WalkTree(root, results, seen, depth: 0, maxDepth: 12, maxItems: 600);
-            }
-            catch { /* UIAutomation unavailable or window inaccessible */ }
-
-            return results;
-        }
-
-        private static void WalkTree(
-            AutomationElement el,
-            List<string> results,
-            HashSet<string> seen,
-            int depth, int maxDepth, int maxItems)
-        {
-            if (depth > maxDepth || results.Count >= maxItems) return;
-
-            try
-            {
-                // Name property (label text, button caption, etc.)
-                string name = el.Current.Name;
-                if (!string.IsNullOrWhiteSpace(name) && name.Length <= 512)
-                {
-                    string trimmed = name.Trim();
-                    if (seen.Add(trimmed)) results.Add(trimmed);
-                }
-
-                // ValuePattern (text-box / read-only field content)
-                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out object vp))
-                {
-                    string val = ((ValuePattern)vp).Current.Value;
-                    if (!string.IsNullOrWhiteSpace(val) && val.Length <= 512)
-                    {
-                        string trimmed = val.Trim();
-                        if (seen.Add(trimmed)) results.Add(trimmed);
-                    }
-                }
-            }
-            catch { }
-
-            // Recurse into children
-            try
-            {
-                var walker = TreeWalker.RawViewWalker;
-                var child  = walker.GetFirstChild(el);
-                while (child != null && results.Count < maxItems)
-                {
-                    WalkTree(child, results, seen, depth + 1, maxDepth, maxItems);
-                    child = walker.GetNextSibling(child);
-                }
-            }
-            catch { }
-        }
-
-        // ── WM_GETTEXT fallback ────────────────────────────────────────────
-
         private static List<string> CollectWindowText(IntPtr root)
         {
             var results = new List<string>();
@@ -212,7 +133,7 @@ namespace iDeviceInfo
                 if (!IsWindowVisible(hwnd)) return true;
 
                 int len = GetWindowTextLength(hwnd);
-                if (len <= 0 || len > 1024) return true;
+                if (len <= 0 || len > 2048) return true;
 
                 var sb = new StringBuilder(len + 2);
                 GetWindowText(hwnd, sb, sb.Capacity);
@@ -249,7 +170,7 @@ namespace iDeviceInfo
                     continue;
                 }
 
-                // Label on its own, value on the next line
+                // Label on its own line, value on the next line
                 if (i + 1 < texts.Count)
                     ApplyLabel(info, lower, texts[i + 1].Trim());
             }
@@ -257,22 +178,18 @@ namespace iDeviceInfo
             // ── Pass 2: regex fallback ─────────────────────────────────────
             foreach (string t in texts)
             {
-                // IMEI: exactly 15 digits
                 if (info.IMEI == "N/A" && Regex.IsMatch(t, @"^\d{15}$"))
                     info.IMEI = t;
 
-                // Serial: 10–15 uppercase alphanumeric
                 if (string.IsNullOrEmpty(info.SerialNumber)
                     && Regex.IsMatch(t, @"^[A-Z0-9]{10,15}$")
                     && t != info.IMEI)
                     info.SerialNumber = t;
 
-                // iOS version: "18.3.1" etc.
                 if (string.IsNullOrEmpty(info.iOSVersion)
                     && Regex.IsMatch(t, @"^\d{1,2}\.\d{1,2}(\.\d{1,2})?$"))
                     info.iOSVersion = t;
 
-                // Battery percentage: "84%"
                 if (info.BatteryLevel == "N/A" && Regex.IsMatch(t, @"^\d{1,3}%$"))
                     info.BatteryLevel = t;
             }
@@ -295,29 +212,26 @@ namespace iDeviceInfo
             else if (label.Contains("imei"))
                 info.IMEI = value;
             else if (label.Contains("battery life") || label.Contains("battery health")
-                  || label.Contains("maximum capacity") || label.Contains("max capacity")
-                  || label.Contains("batterycapacity"))
+                  || label.Contains("maximum capacity") || label.Contains("max capacity"))
                 info.BatteryHealth = value;
             else if (label.Contains("battery"))
                 info.BatteryLevel = value;
             else if (label.Contains("device name") || label.Contains("iphone name")
                   || label.Contains("ipad name")   || label.Contains("item title")
-                  || label.Contains("phone name")  || label.Contains("devicename"))
+                  || label.Contains("phone name"))
                 info.DeviceName = value;
             else if (label.Contains("ios version") || label.Contains("system version")
-                  || label.Contains("software version") || label.Contains("iosversion"))
+                  || label.Contains("software version"))
                 info.iOSVersion = value;
-            else if (label.Contains("model name") || label.Contains("device model")
-                  || label.Contains("modelname"))
+            else if (label.Contains("model name") || label.Contains("device model"))
                 info.ModelName = value;
         }
 
         // ── Debug dump ────────────────────────────────────────────────────
 
         /// <summary>
-        /// Collects all text from 3uTools (UIAutomation + WM_GETTEXT),
-        /// saves to iDeviceInfo_debug.txt on the Desktop, and opens it in Notepad.
-        /// Use this to diagnose "no device" problems.
+        /// Saves everything WM_GETTEXT collects from 3uTools to iDeviceInfo_debug.txt
+        /// on the Desktop and opens it in Notepad. Use this to diagnose "no device".
         /// </summary>
         public static void DumpToFile()
         {
@@ -346,34 +260,24 @@ namespace iDeviceInfo
                 {
                     $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
                     $"3uTools HWND: 0x{hwnd:X}",
+                    $"Total child text items: ...",
                     ""
                 };
 
-                lines.Add("=== UIAutomation (primary) ===");
-                var uia = CollectViaUIAutomation(hwnd);
-                lines.Add($"Items: {uia.Count}");
+                var texts = CollectWindowText(hwnd);
+                lines[2] = $"Total child text items: {texts.Count}";
+                lines.Add("=== All text collected from 3uTools via WM_GETTEXT ===");
                 lines.Add("");
-                lines.AddRange(uia);
-
-                lines.Add("");
-                lines.Add("=== WM_GETTEXT Win32 (fallback) ===");
-                var wm = CollectWindowText(hwnd);
-                lines.Add($"Items: {wm.Count}");
-                lines.Add("");
-                lines.AddRange(wm);
-
-                // Run parser and show what it found
-                var combined = new List<string>(uia);
-                foreach (var t in wm)
-                    if (!combined.Contains(t)) combined.Add(t);
-                var parsed = ParseDeviceInfo(combined);
+                for (int i = 0; i < texts.Count; i++)
+                    lines.Add($"[{i,3}] {texts[i]}");
 
                 lines.Add("");
                 lines.Add("=== Parser result ===");
+                var parsed = ParseDeviceInfo(texts);
                 if (parsed == null)
                 {
                     lines.Add("No device detected — Serial/IMEI not found in collected text.");
-                    lines.Add("Share this file so we can fix the parser.");
+                    lines.Add("Share this file to fix the parser.");
                 }
                 else
                 {
