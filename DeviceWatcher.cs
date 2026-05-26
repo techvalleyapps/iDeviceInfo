@@ -34,14 +34,26 @@ namespace iDeviceInfo
         /// </summary>
         public void Start()
         {
-            _callbackDelegate = OnDeviceNotification; // root the delegate
+            _callbackDelegate = OnDeviceNotification; // root the delegate — GC must not collect this
 
             int ret = AMD.AMDeviceNotificationSubscribe(
                 _callbackDelegate, 0, 0, IntPtr.Zero, out _subscription);
 
-            // ret != 0 means Apple Mobile Device Service is not running
-            // (iTunes / Apple Devices app not installed). The app will still
-            // launch — it just won't detect devices until the service is running.
+            // ret != 0 → Apple Mobile Device Service not running (iTunes not installed)
+        }
+
+        /// <summary>
+        /// Re-subscribes (unsubscribe + subscribe). Call this if the initial
+        /// subscription missed an already-connected device.
+        /// </summary>
+        public void Restart()
+        {
+            if (_subscription != IntPtr.Zero)
+            {
+                SafeCall(() => AMD.AMDeviceNotificationUnsubscribe(_subscription));
+                _subscription = IntPtr.Zero;
+            }
+            Start();
         }
 
         // ── Callback (delivered on the UI thread via WinForms message pump) ──
