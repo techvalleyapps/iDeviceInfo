@@ -15,10 +15,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
+      - name: Show .NET version
+        run: dotnet --version
 
       - name: Restore
         run: dotnet restore iDeviceInfo.csproj
@@ -44,11 +42,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
 
       - name: Publish for release
         run: dotnet publish iDeviceInfo.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true --output ./publish/win-x64
