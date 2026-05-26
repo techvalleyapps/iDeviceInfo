@@ -149,7 +149,6 @@ namespace iDeviceInfo
                 : Color.FromArgb(130, 130, 130); // grey when idle
 
             using var bodyBrush  = new SolidBrush(bodyColor);
-            using var pen        = new Pen(bodyColor, 1.2f);
 
             // Rounded rectangle as phone body
             float x = 3, y = 1, w = 10, h = 14, r = 2.5f;
