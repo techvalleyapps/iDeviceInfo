@@ -55,7 +55,7 @@ namespace iDeviceInfo
         public string ToClipboardText() =>
             $"Device Name:    {DeviceName}\n" +
             $"Model:          {(string.IsNullOrEmpty(ModelName) ? ProductType : ModelName)}\n" +
-            $"iOS Version:    {iOSVersion}\n" +
+            $"iOS Build:      {iOSVersion}\n" +
             $"Serial Number:  {SerialNumber}\n" +
             $"IMEI:           {IMEI}\n" +
             (string.IsNullOrEmpty(IMEI2) ? "" : $"IMEI 2:         {IMEI2}\n") +

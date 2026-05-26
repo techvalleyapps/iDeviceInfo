@@ -10,12 +10,12 @@ using System.Windows.Forms;
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Reads device info by scraping 3uTools every 2 seconds.
+    /// Reads device info from 3uTools every 2 seconds.
     ///
-    /// 3uTools renders its UI inside QtWebEngine (embedded Chromium), so neither
-    /// WM_GETTEXT nor IAccessible expose any text.  Instead we read the LevelDB
-    /// files that QtWebEngine writes to LocalAppData — device info flows through
-    /// localStorage/sessionStorage in real time.
+    /// 3uTools uses QtWebEngine (embedded Chromium) for its UI, so WM_GETTEXT and
+    /// IAccessible return nothing.  Instead we read the LevelDB localStorage/
+    /// sessionStorage files that QtWebEngine writes in real time — they contain a
+    /// "BasicsData" JSON blob with every device field we need.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
     {
@@ -79,27 +79,21 @@ namespace iDeviceInfo
 
         private static DeviceInfo? TryScrape3uTools()
         {
-            // 3uTools must be running
             Process[] procs = Process.GetProcessesByName("3uTools");
             bool running = procs.Length > 0;
             foreach (var p in procs) p.Dispose();
             if (!running) return null;
 
-            // Read device info from QtWebEngine LevelDB storage files
             List<string> texts = CollectFromLocalStorage();
             return ParseDeviceInfo(texts);
         }
 
-        // ── LevelDB string extraction ─────────────────────────────────────
+        // ── LevelDB reading ───────────────────────────────────────────────
 
-        private static readonly string s_storageRoot = Path.Combine(
+        private static readonly string StorageRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "3uTools", "QtWebEngine", "Default");
 
-        /// <summary>
-        /// Reads all LevelDB .log and .ldb files from 3uTools' QtWebEngine storage
-        /// and extracts printable strings (both ASCII and UTF-16 LE).
-        /// </summary>
         private static List<string> CollectFromLocalStorage()
         {
             var results = new List<string>();
@@ -107,8 +101,8 @@ namespace iDeviceInfo
 
             string[] dirs =
             {
-                Path.Combine(s_storageRoot, "Session Storage"),
-                Path.Combine(s_storageRoot, "Local Storage", "leveldb"),
+                Path.Combine(StorageRoot, "Session Storage"),
+                Path.Combine(StorageRoot, "Local Storage", "leveldb"),
             };
 
             foreach (string dir in dirs)
@@ -121,7 +115,6 @@ namespace iDeviceInfo
 
                 foreach (string file in files)
                 {
-                    // Skip tiny/empty bookkeeping files
                     try { if (new FileInfo(file).Length < 10) continue; } catch { continue; }
 
                     byte[]? data = TryReadShared(file);
@@ -138,10 +131,6 @@ namespace iDeviceInfo
             return results;
         }
 
-        /// <summary>
-        /// Reads a file that may be open/locked by 3uTools using FileShare.ReadWrite.
-        /// Returns null if the file cannot be read.
-        /// </summary>
         private static byte[]? TryReadShared(string path)
         {
             try
@@ -149,20 +138,18 @@ namespace iDeviceInfo
                 using var fs = new FileStream(
                     path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 var buf = new byte[fs.Length];
-                fs.Read(buf, 0, buf.Length);
+                _ = fs.Read(buf, 0, buf.Length);
                 return buf;
             }
             catch { return null; }
         }
 
-        /// <summary>Extracts contiguous printable ASCII runs of at least minLen chars.</summary>
         private static IEnumerable<string> ExtractAsciiStrings(byte[] data, int minLen)
         {
             var sb = new StringBuilder();
             foreach (byte b in data)
             {
-                if (b >= 0x20 && b < 0x7F)
-                    sb.Append((char)b);
+                if (b >= 0x20 && b < 0x7F) sb.Append((char)b);
                 else
                 {
                     if (sb.Length >= minLen) yield return sb.ToString();
@@ -172,105 +159,123 @@ namespace iDeviceInfo
             if (sb.Length >= minLen) yield return sb.ToString();
         }
 
-        /// <summary>
-        /// Extracts UTF-16 LE strings (each char = lo byte printable ASCII + hi byte 0x00).
-        /// Chromium's V8 stores many JS strings in UTF-16 LE inside LevelDB.
-        /// </summary>
         private static IEnumerable<string> ExtractUtf16Strings(byte[] data, int minLen)
         {
             var sb = new StringBuilder();
             int i = 0;
             while (i + 1 < data.Length)
             {
-                byte lo = data[i];
-                byte hi = data[i + 1];
-                if (lo >= 0x20 && lo < 0x7F && hi == 0x00)
-                {
-                    sb.Append((char)lo);
-                    i += 2;
-                }
+                byte lo = data[i], hi = data[i + 1];
+                if (lo >= 0x20 && lo < 0x7F && hi == 0x00) { sb.Append((char)lo); i += 2; }
                 else
                 {
                     if (sb.Length >= minLen) yield return sb.ToString();
-                    sb.Clear();
-                    i++;
+                    sb.Clear(); i++;
                 }
             }
             if (sb.Length >= minLen) yield return sb.ToString();
         }
 
-        // ── Parsing ───────────────────────────────────────────────────────
+        // ── JSON field extraction ─────────────────────────────────────────
+        // 3uTools stores device data as a BasicsData JSON blob in localStorage.
+        // The blob may be split across multiple extracted strings (LevelDB records
+        // break at newlines), so we run the regexes against every string that
+        // looks JSON-like and take the first match found for each field.
+
+        // Each regex targets the *direct* JSON string value  "key":"value"
+        // (the key must end with :" to avoid matching nested object keys).
+
+        private static readonly Regex ReDeviceName  = new(@"""deviceName""\s*:\s*""([^""]{1,120})""",   RegexOptions.Compiled);
+        private static readonly Regex ReImei        = new(@"""imei""\s*:\s*""(\d{14,16})""",             RegexOptions.Compiled);
+        private static readonly Regex ReImei2       = new(@"""imei2""\s*:\s*""(\d{14,16})""",            RegexOptions.Compiled);
+        // "serial":"CF9G2X7GK6"  — but NOT "key_serial":{...}  (the :" guard works)
+        private static readonly Regex ReSerial      = new(@"(?<![_a-z])""serial""\s*:\s*""([A-Z0-9]{6,20})""", RegexOptions.Compiled);
+        private static readonly Regex ReBatLife     = new(@"""batLife""\s*:\s*""(\d{1,3})""",            RegexOptions.Compiled);
+        private static readonly Regex ReProductType = new(@"""productType""\s*:\s*""([^""]{1,60})""",    RegexOptions.Compiled);
+        private static readonly Regex ReBuildVer    = new(@"""buildver""\s*:\s*""([A-Z0-9]{3,10})""",    RegexOptions.Compiled);
+        // Model from key_model.read
+        private static readonly Regex ReModelRead   = new(@"""key_model""\s*:\s*\{[^}]*?""read""\s*:\s*""([^""]{1,80})""", RegexOptions.Compiled);
+        // Also accept deviceName as model name when no key_model present
+        private static readonly Regex ReColor       = new(@"""color""\s*:\s*""([^""]{1,80})""",          RegexOptions.Compiled);
 
         private static DeviceInfo? ParseDeviceInfo(List<string> texts)
         {
             var info = new DeviceInfo();
 
-            // Pass 1: label → value pairs
-            for (int i = 0; i < texts.Count; i++)
-            {
-                string raw   = texts[i];
-                string lower = raw.ToLowerInvariant();
-
-                int colon = raw.IndexOf(':');
-                if (colon > 0 && colon < raw.Length - 1)
-                {
-                    ApplyLabel(info, raw[..colon].Trim().ToLowerInvariant(), raw[(colon + 1)..].Trim());
-                    continue;
-                }
-
-                if (i + 1 < texts.Count)
-                    ApplyLabel(info, lower, texts[i + 1].Trim());
-            }
-
-            // Pass 2: regex fallback
             foreach (string t in texts)
             {
-                if (info.IMEI == "N/A" && Regex.IsMatch(t, @"^\d{15}$"))
-                    info.IMEI = t;
+                // Only bother scanning strings that look like 3uTools JSON
+                if (!t.Contains('"')) continue;
 
-                if (string.IsNullOrEmpty(info.SerialNumber)
-                    && Regex.IsMatch(t, @"^[A-Z0-9]{10,15}$")
-                    && t != info.IMEI)
-                    info.SerialNumber = t;
+                Match m;
 
-                if (string.IsNullOrEmpty(info.iOSVersion)
-                    && Regex.IsMatch(t, @"^\d{1,2}\.\d{1,2}(\.\d{1,2})?$"))
-                    info.iOSVersion = t;
+                if (info.DeviceName == "Unknown Device")
+                {
+                    m = ReDeviceName.Match(t);
+                    if (m.Success) info.DeviceName = m.Groups[1].Value.Trim();
+                }
 
-                if (info.BatteryLevel == "N/A" && Regex.IsMatch(t, @"^\d{1,3}%$"))
-                    info.BatteryLevel = t;
+                if (info.IMEI == "N/A")
+                {
+                    m = ReImei.Match(t);
+                    if (m.Success) info.IMEI = m.Groups[1].Value;
+                }
+
+                if (string.IsNullOrEmpty(info.IMEI2))
+                {
+                    m = ReImei2.Match(t);
+                    if (m.Success) info.IMEI2 = m.Groups[1].Value;
+                }
+
+                if (string.IsNullOrEmpty(info.SerialNumber))
+                {
+                    m = ReSerial.Match(t);
+                    if (m.Success) info.SerialNumber = m.Groups[1].Value;
+                }
+
+                if (info.BatteryHealth == "N/A")
+                {
+                    m = ReBatLife.Match(t);
+                    if (m.Success) info.BatteryHealth = m.Groups[1].Value + "%";
+                }
+
+                if (string.IsNullOrEmpty(info.ProductType))
+                {
+                    m = ReProductType.Match(t);
+                    if (m.Success) info.ProductType = m.Groups[1].Value;
+                }
+
+                if (string.IsNullOrEmpty(info.iOSVersion))
+                {
+                    m = ReBuildVer.Match(t);
+                    if (m.Success) info.iOSVersion = m.Groups[1].Value;
+                }
+
+                if (string.IsNullOrEmpty(info.ModelName))
+                {
+                    m = ReModelRead.Match(t);
+                    if (m.Success) info.ModelName = m.Groups[1].Value;
+                }
+
+                // Colour stored in ProductType's sibling field — use as subtitle hint
+                if (string.IsNullOrEmpty(info.ProductType))
+                {
+                    m = ReColor.Match(t);
+                    if (m.Success && !m.Groups[1].Value.StartsWith("Front"))
+                    {
+                        // only for strings like "Natural Titanium", not "Front Black\nRear …"
+                    }
+                }
             }
+
+            // Fall back: if ModelName empty, use DeviceName
+            if (string.IsNullOrEmpty(info.ModelName) && info.DeviceName != "Unknown Device")
+                info.ModelName = info.DeviceName;
 
             bool hasDevice = !string.IsNullOrEmpty(info.SerialNumber)
                           || (info.IMEI != "N/A" && !string.IsNullOrEmpty(info.IMEI));
 
             return hasDevice ? info : null;
-        }
-
-        private static void ApplyLabel(DeviceInfo info, string label, string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return;
-
-            if (label.Contains("serial") || label is "s/n" or "sn")
-                info.SerialNumber = value;
-            else if (label.Contains("imei2") || label.Contains("imei 2") || label.Contains("imei_2"))
-                info.IMEI2 = value;
-            else if (label.Contains("imei"))
-                info.IMEI = value;
-            else if (label.Contains("battery life") || label.Contains("battery health")
-                  || label.Contains("maximum capacity") || label.Contains("max capacity"))
-                info.BatteryHealth = value;
-            else if (label.Contains("battery"))
-                info.BatteryLevel = value;
-            else if (label.Contains("device name") || label.Contains("iphone name")
-                  || label.Contains("ipad name")   || label.Contains("item title")
-                  || label.Contains("phone name"))
-                info.DeviceName = value;
-            else if (label.Contains("ios version") || label.Contains("system version")
-                  || label.Contains("software version"))
-                info.iOSVersion = value;
-            else if (label.Contains("model name") || label.Contains("device model"))
-                info.ModelName = value;
         }
 
         // ── Debug dump ────────────────────────────────────────────────────
@@ -288,22 +293,18 @@ namespace iDeviceInfo
                 ""
             };
 
-            // LevelDB strings
-            lines.Add("=== Strings extracted from QtWebEngine LevelDB ===");
-            var lsTexts = CollectFromLocalStorage();
-            lines.Add($"Total unique strings: {lsTexts.Count}");
+            var texts = CollectFromLocalStorage();
+            lines.Add($"=== LevelDB strings ({texts.Count} unique) ===");
             lines.Add("");
-            for (int i = 0; i < lsTexts.Count; i++)
-                lines.Add($"[{i,4}] {lsTexts[i]}");
+            for (int i = 0; i < texts.Count; i++)
+                lines.Add($"[{i,4}] {texts[i]}");
 
-            // Parser result
-            var parsed = ParseDeviceInfo(lsTexts);
+            var parsed = ParseDeviceInfo(texts);
             lines.Add("");
             lines.Add("=== Parser result ===");
             if (parsed == null)
             {
-                lines.Add("No device detected — Serial/IMEI not found in LevelDB strings.");
-                lines.Add("Share this file to tune the parser.");
+                lines.Add("No device detected.");
             }
             else
             {
@@ -313,31 +314,9 @@ namespace iDeviceInfo
                 lines.Add($"SerialNumber:  {parsed.SerialNumber}");
                 lines.Add($"IMEI:          {parsed.IMEI}");
                 lines.Add($"IMEI2:         {parsed.IMEI2}");
-                lines.Add($"BatteryLevel:  {parsed.BatteryLevel}");
                 lines.Add($"BatteryHealth: {parsed.BatteryHealth}");
-            }
-
-            // File inventory
-            lines.Add("");
-            lines.Add("=== LevelDB file inventory ===");
-            string[] dirs =
-            {
-                Path.Combine(s_storageRoot, "Session Storage"),
-                Path.Combine(s_storageRoot, "Local Storage", "leveldb"),
-            };
-            foreach (string dir in dirs)
-            {
-                lines.Add($"DIR: {dir}");
-                if (!Directory.Exists(dir)) { lines.Add("  (not found)"); continue; }
-                try
-                {
-                    foreach (var f in Directory.GetFiles(dir))
-                    {
-                        var fi = new FileInfo(f);
-                        lines.Add($"  {fi.Name,-40} {fi.Length,8} bytes  {fi.LastWriteTime:HH:mm:ss}");
-                    }
-                }
-                catch (Exception ex) { lines.Add($"  error: {ex.Message}"); }
+                lines.Add($"BatteryLevel:  {parsed.BatteryLevel}");
+                lines.Add($"ProductType:   {parsed.ProductType}");
             }
 
             try
