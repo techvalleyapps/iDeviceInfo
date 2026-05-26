@@ -6,8 +6,12 @@ using iDeviceInfo.Native;
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Monitors USB device connect / disconnect events via Apple's MobileDevice.dll
-    /// and raises typed .NET events with full device info when a device connects.
+    /// Monitors USB device connect / disconnect events via Apple's MobileDevice.dll.
+    ///
+    /// IMPORTANT: Start() must be called from the UI thread.
+    /// AMDeviceNotificationSubscribe on Windows delivers callbacks via the Windows
+    /// message queue of the subscribing thread. The WinForms message pump (already
+    /// running on the UI thread via Application.Run) handles delivery automatically.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
     {
@@ -18,65 +22,30 @@ namespace iDeviceInfo
 
         // ── State ─────────────────────────────────────────────────────────
 
-        private AMD.DeviceNotificationCallback? _callbackDelegate; // keep alive!
+        private AMD.DeviceNotificationCallback? _callbackDelegate; // keep alive — GC must not collect
         private IntPtr                          _subscription;
-        private Thread?                         _runLoopThread;
         private bool                            _disposed;
 
         // ── Public API ────────────────────────────────────────────────────
 
         /// <summary>
-        /// Starts listening for device connections.
-        /// Spins up a background thread that pumps CoreFoundation run-loop events.
+        /// Subscribes to device notifications. MUST be called on the UI thread
+        /// so that the WinForms message pump can deliver the callbacks.
         /// </summary>
         public void Start()
         {
-            if (_runLoopThread != null) return;
+            _callbackDelegate = OnDeviceNotification; // root the delegate
 
-            _callbackDelegate = OnDeviceNotification; // must stay rooted
+            int ret = AMD.AMDeviceNotificationSubscribe(
+                _callbackDelegate, 0, 0, IntPtr.Zero, out _subscription);
 
-            _runLoopThread = new Thread(RunLoop)
-            {
-                Name         = "iDeviceInfo-RunLoop",
-                IsBackground = true
-            };
-            _runLoopThread.Start();
+            // ret != 0 means Apple Mobile Device Service is not running
+            // (iTunes / Apple Devices app not installed). The app will still
+            // launch — it just won't detect devices until the service is running.
         }
 
-        // ── Private ───────────────────────────────────────────────────────
+        // ── Callback (delivered on the UI thread via WinForms message pump) ──
 
-        /// <summary>
-        /// Background thread: registers the notification callback and pumps the
-        /// CoreFoundation run loop so notifications are delivered.
-        /// </summary>
-        private void RunLoop()
-        {
-            try
-            {
-                int ret = AMD.AMDeviceNotificationSubscribe(
-                    _callbackDelegate!, 0, 0, IntPtr.Zero, out _subscription);
-
-                if (ret != 0)
-                    return; // service not running or iTunes not installed
-
-                // Pump the CF run loop — this blocks until the thread is aborted
-                // or the subscription is cancelled. We use a simple sleep loop here
-                // because the Windows port of MobileDevice.dll delivers callbacks
-                // on the subscribing thread via internal GetMessage / WaitForSingleObject.
-                while (!_disposed)
-                    Thread.Sleep(250);
-            }
-            catch (ThreadAbortException)
-            {
-                // Normal shutdown
-            }
-            catch
-            {
-                // Apple Mobile Device Service not running, iTunes not installed, etc.
-            }
-        }
-
-        /// <summary>Called by MobileDevice.dll on the run-loop thread.</summary>
         private void OnDeviceNotification(
             ref AMD.DeviceCallbackInfo info, IntPtr cookie)
         {
@@ -85,12 +54,11 @@ namespace iDeviceInfo
                 try
                 {
                     var deviceInfo = ReadDeviceInfo(info.Device);
-                    // Marshal to UI thread
                     DeviceConnected?.Invoke(this, deviceInfo);
                 }
                 catch
                 {
-                    // Swallow — don't crash the run-loop thread
+                    // Don't crash — device may have been unplugged mid-read
                 }
             }
             else if (info.Message == AMD.MSG_DISCONNECTED)
@@ -113,14 +81,14 @@ namespace iDeviceInfo
 
                 // ── Identity ─────────────────────────────────────────────
 
-                info.DeviceName  = ReadString(device, null, "DeviceName")    ?? "Unknown";
-                info.ProductType = ReadString(device, null, "ProductType")   ?? "";
-                info.iOSVersion  = ReadString(device, null, "ProductVersion")  ?? "";
-                info.UDID        = ReadString(device, null, "UniqueDeviceID")  ?? "";
-                info.SerialNumber= ReadString(device, null, "SerialNumber")   ?? "";
-                info.ModelName   = MapProductTypeToName(info.ProductType);
+                info.DeviceName   = ReadString(device, null, "DeviceName")     ?? "Unknown";
+                info.ProductType  = ReadString(device, null, "ProductType")    ?? "";
+                info.iOSVersion   = ReadString(device, null, "ProductVersion") ?? "";
+                info.UDID         = ReadString(device, null, "UniqueDeviceID") ?? "";
+                info.SerialNumber = ReadString(device, null, "SerialNumber")   ?? "";
+                info.ModelName    = MapProductTypeToName(info.ProductType);
 
-                // IMEI — not present on Wi-Fi-only iPads
+                // IMEI — absent on Wi-Fi-only iPads
                 info.IMEI  = ReadString(device, null, "InternationalMobileEquipmentIdentity")  ?? "N/A";
                 info.IMEI2 = ReadString(device, null, "InternationalMobileEquipmentIdentity2") ?? "";
 
@@ -131,11 +99,11 @@ namespace iDeviceInfo
                 string? health   = ReadString(device, battDomain, "BatteryMaximumCapacity");
                 string? charging = ReadString(device, battDomain, "BatteryIsCharging");
 
-                info.BatteryLevel  = level    != null ? $"{level}%"  : "N/A";
-                info.BatteryHealth = health   != null ? $"{health}%" : "N/A";
+                info.BatteryLevel  = level  != null ? $"{level}%"  : "N/A";
+                info.BatteryHealth = health != null ? $"{health}%" : "N/A";
                 info.IsCharging    = charging is "true" or "1";
 
-                // If standard lockdown doesn't expose health, try diagnostics relay
+                // Fallback: try diagnostics relay for battery health
                 if (info.BatteryHealth == "N/A")
                 {
                     string? relayHealth = TryReadBatteryHealthViaRelay(device);
@@ -186,10 +154,6 @@ namespace iDeviceInfo
 
         // ── Diagnostics Relay (battery health fallback) ───────────────────
 
-        /// <summary>
-        /// Attempts to read BatteryMaximumCapacity / DesignCapacity via the
-        /// com.apple.mobile.diagnostics_relay service. Returns e.g. "87%" or null.
-        /// </summary>
         private static string? TryReadBatteryHealthViaRelay(IntPtr device)
         {
             IntPtr serviceNameCF = IntPtr.Zero;
@@ -200,7 +164,6 @@ namespace iDeviceInfo
                                                    out IntPtr handle, IntPtr.Zero);
                 if (ret != 0 || handle == IntPtr.Zero) return null;
 
-                // Build a plist XML request for the IORegistry entry
                 const string plist =
                     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" " +
@@ -212,17 +175,14 @@ namespace iDeviceInfo
                     "</dict></plist>";
 
                 byte[] plistBytes = System.Text.Encoding.UTF8.GetBytes(plist);
-
-                // The handle is a raw Winsock SOCKET (IntPtr = SOCKET type)
-                // Send: big-endian uint32 length + plist bytes
-                byte[] lenBuf = new byte[4];
                 int networkLen = System.Net.IPAddress.HostToNetworkOrder(plistBytes.Length);
+
+                byte[] lenBuf = new byte[4];
                 System.Buffer.BlockCopy(BitConverter.GetBytes(networkLen), 0, lenBuf, 0, 4);
 
-                SendAll(handle, lenBuf,    4);
+                SendAll(handle, lenBuf, 4);
                 SendAll(handle, plistBytes, plistBytes.Length);
 
-                // Receive response length
                 byte[] respLenBuf = new byte[4];
                 RecvAll(handle, respLenBuf, 4);
                 int respLen = System.Net.IPAddress.NetworkToHostOrder(
@@ -232,9 +192,8 @@ namespace iDeviceInfo
 
                 byte[] respBuf = new byte[respLen];
                 RecvAll(handle, respBuf, respLen);
-                string response = System.Text.Encoding.UTF8.GetString(respBuf);
-
-                return ParseBatteryHealthFromPlist(response);
+                return ParseBatteryHealthFromPlist(
+                    System.Text.Encoding.UTF8.GetString(respBuf));
             }
             catch
             {
@@ -246,7 +205,6 @@ namespace iDeviceInfo
             }
         }
 
-        // Winsock send/recv helpers
         [DllImport("ws2_32.dll", SetLastError = true)]
         private static extern int send(IntPtr s, byte[] buf, int len, int flags);
 
@@ -255,21 +213,14 @@ namespace iDeviceInfo
 
         private static void SendAll(IntPtr sock, byte[] buf, int len)
         {
-            int sent = 0;
-            while (sent < len)
+            int offset = 0;
+            while (offset < len)
             {
-                int n = send(sock, buf, len - sent, 0);
+                byte[] segment = new byte[len - offset];
+                Array.Copy(buf, offset, segment, 0, segment.Length);
+                int n = send(sock, segment, segment.Length, 0);
                 if (n <= 0) throw new InvalidOperationException("Send failed");
-                // Shift buffer manually for partial sends
-                if (n < len - sent)
-                {
-                    byte[] tmp = new byte[len - sent - n];
-                    Array.Copy(buf, sent + n, tmp, 0, tmp.Length);
-                    buf = tmp;
-                    len = tmp.Length;
-                    sent = 0;
-                }
-                else sent += n;
+                offset += n;
             }
         }
 
@@ -284,36 +235,25 @@ namespace iDeviceInfo
             }
         }
 
-        // ── Plist parser (minimal — just extracts two integers) ───────────
-
         private static string? ParseBatteryHealthFromPlist(string plist)
         {
-            // We look for MaxCapacity and DesignCapacity in the flat plist XML.
-            // Full XML parsing is avoided to keep dependencies minimal.
             long max    = ExtractIntFromPlist(plist, "MaxCapacity");
             long design = ExtractIntFromPlist(plist, "DesignCapacity");
-
             if (max <= 0 || design <= 0) return null;
-
-            double health = (double)max / design * 100.0;
-            return $"{Math.Round(health, 1)}%";
+            return $"{Math.Round((double)max / design * 100.0, 1)}%";
         }
 
         private static long ExtractIntFromPlist(string plist, string key)
         {
-            // Finds: <key>KeyName</key><integer>VALUE</integer>
             string marker = $"<key>{key}</key>";
             int idx = plist.IndexOf(marker, StringComparison.Ordinal);
             if (idx < 0) return -1;
-
-            int intStart = plist.IndexOf("<integer>", idx + marker.Length, StringComparison.Ordinal);
-            if (intStart < 0) return -1;
-            intStart += "<integer>".Length;
-
-            int intEnd = plist.IndexOf("</integer>", intStart, StringComparison.Ordinal);
-            if (intEnd < 0) return -1;
-
-            return long.TryParse(plist[intStart..intEnd].Trim(), out long val) ? val : -1;
+            int start = plist.IndexOf("<integer>", idx + marker.Length, StringComparison.Ordinal);
+            if (start < 0) return -1;
+            start += "<integer>".Length;
+            int end = plist.IndexOf("</integer>", start, StringComparison.Ordinal);
+            if (end < 0) return -1;
+            return long.TryParse(plist[start..end].Trim(), out long val) ? val : -1;
         }
 
         // ── ProductType → friendly name ───────────────────────────────────
@@ -321,57 +261,46 @@ namespace iDeviceInfo
         private static string MapProductTypeToName(string productType) =>
             productType switch
             {
-                // iPhone 16 series
                 "iPhone17,1" => "iPhone 16 Pro Max",
                 "iPhone17,2" => "iPhone 16 Pro",
                 "iPhone17,3" => "iPhone 16 Plus",
                 "iPhone17,4" => "iPhone 16",
-                // iPhone 15 series
                 "iPhone16,1" => "iPhone 15",
                 "iPhone16,2" => "iPhone 15 Plus",
                 "iPhone16,3" => "iPhone 15 Pro",
                 "iPhone16,4" => "iPhone 15 Pro Max",
-                // iPhone 14 series
                 "iPhone15,2" => "iPhone 14 Pro",
                 "iPhone15,3" => "iPhone 14 Pro Max",
                 "iPhone14,7" => "iPhone 14",
                 "iPhone14,8" => "iPhone 14 Plus",
-                // iPhone 13 series
                 "iPhone14,4" => "iPhone 13 mini",
                 "iPhone14,5" => "iPhone 13",
                 "iPhone14,2" => "iPhone 13 Pro",
                 "iPhone14,3" => "iPhone 13 Pro Max",
-                // iPhone 12 series
                 "iPhone13,1" => "iPhone 12 mini",
                 "iPhone13,2" => "iPhone 12",
                 "iPhone13,3" => "iPhone 12 Pro",
                 "iPhone13,4" => "iPhone 12 Pro Max",
-                // iPhone 11 series
                 "iPhone12,1" => "iPhone 11",
                 "iPhone12,3" => "iPhone 11 Pro",
                 "iPhone12,5" => "iPhone 11 Pro Max",
-                // iPhone SE
                 "iPhone14,6" => "iPhone SE (3rd gen)",
                 "iPhone12,8" => "iPhone SE (2nd gen)",
                 "iPhone8,4"  => "iPhone SE (1st gen)",
-                // iPad (recent)
                 "iPad13,18"  => "iPad (10th gen)",
                 "iPad13,19"  => "iPad (10th gen)",
                 "iPad14,1"   => "iPad mini (6th gen)",
                 "iPad14,2"   => "iPad mini (6th gen)",
-                // iPad Pro
                 "iPad14,3"   => "iPad Pro 11\" (4th gen)",
                 "iPad14,4"   => "iPad Pro 11\" (4th gen)",
                 "iPad14,5"   => "iPad Pro 12.9\" (6th gen)",
                 "iPad14,6"   => "iPad Pro 12.9\" (6th gen)",
-                _            => productType  // Fall back to raw identifier
+                _            => productType
             };
-
-        // ── Utilities ─────────────────────────────────────────────────────
 
         private static void SafeCall(Action action)
         {
-            try { action(); } catch { /* Ignore cleanup errors */ }
+            try { action(); } catch { }
         }
 
         // ── IDisposable ───────────────────────────────────────────────────
@@ -380,11 +309,8 @@ namespace iDeviceInfo
         {
             if (_disposed) return;
             _disposed = true;
-
             if (_subscription != IntPtr.Zero)
                 SafeCall(() => AMD.AMDeviceNotificationUnsubscribe(_subscription));
-
-            _runLoopThread?.Join(2000);
         }
     }
 }
