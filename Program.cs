@@ -1,6 +1,4 @@
 using System;
-using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace iDeviceInfo
@@ -10,15 +8,6 @@ namespace iDeviceInfo
         [STAThread]
         static void Main()
         {
-            // ── Add Apple Mobile Device Support to the DLL search path ──────
-            // This ensures MobileDevice.dll and CoreFoundation.dll are found
-            // without needing them in the same folder as our exe.
-            const string appleMDPath =
-                @"C:\Program Files\Common Files\Apple\Mobile Device Support";
-
-            if (Directory.Exists(appleMDPath))
-                SetDllDirectory(appleMDPath);
-
             // ── Single-instance guard ────────────────────────────────────────
             using var mutex = new System.Threading.Mutex(
                 true, "iDeviceInfo_SingleInstance", out bool isNew);
@@ -56,8 +45,5 @@ namespace iDeviceInfo
             ApplicationConfiguration.Initialize();
             Application.Run(new TrayApplicationContext());
         }
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool SetDllDirectory(string lpPathName);
     }
 }
