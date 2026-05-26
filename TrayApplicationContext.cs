@@ -1,7 +1,6 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Threading;
 using System.Windows.Forms;
 using iDeviceInfo.Forms;
 
@@ -13,18 +12,13 @@ namespace iDeviceInfo
     /// </summary>
     public sealed class TrayApplicationContext : ApplicationContext
     {
-        private readonly NotifyIcon              _tray;
-        private readonly DeviceWatcher           _watcher;
-        private readonly SynchronizationContext  _uiCtx;
-        private DeviceInfo?                      _lastDevice;
-        private DeviceInfoForm?                  _popup;
+        private readonly NotifyIcon    _tray;
+        private readonly DeviceWatcher _watcher;
+        private DeviceInfo?            _lastDevice;
+        private DeviceInfoForm?        _popup;
 
         public TrayApplicationContext()
         {
-            // Capture the UI sync context immediately — the watcher thread needs it
-            _uiCtx = SynchronizationContext.Current
-                     ?? new WindowsFormsSynchronizationContext();
-
             // ── Tray icon ─────────────────────────────────────────────────
             _tray = new NotifyIcon
             {
@@ -63,38 +57,27 @@ namespace iDeviceInfo
             // ── Device watcher ────────────────────────────────────────────
             _watcher = new DeviceWatcher();
 
+            // Callbacks arrive on the UI thread (WinForms message pump)
+            // so no InvokeOnUI marshalling needed
             _watcher.DeviceConnected += (_, info) =>
             {
                 _lastDevice = info;
-
-                // Update tray on UI thread
-                InvokeOnUI(() =>
-                {
-                    UpdateTrayIcon(connected: true);
-
-                    showItem.Enabled = true;
-                    _tray.Text = $"iDeviceInfo — {info.DeviceName}";
-
-                    ShowBalloon($"Device Connected", info.DeviceName);
-                    ShowPopup();
-                });
+                UpdateTrayIcon(connected: true);
+                showItem.Enabled = true;
+                _tray.Text = $"iDeviceInfo — {info.DeviceName}";
+                ShowBalloon("Device Connected", info.DeviceName);
+                ShowPopup();
             };
 
             _watcher.DeviceDisconnected += (_, _) =>
             {
                 _lastDevice = null;
-
-                InvokeOnUI(() =>
-                {
-                    UpdateTrayIcon(connected: false);
-                    showItem.Enabled = false;
-                    _tray.Text       = "iDeviceInfo — No device connected";
-
-                    _popup?.Close();
-                    _popup = null;
-
-                    ShowBalloon("Device Disconnected", "No iOS device connected.");
-                });
+                UpdateTrayIcon(connected: false);
+                showItem.Enabled = false;
+                _tray.Text = "iDeviceInfo — No device connected";
+                _popup?.Close();
+                _popup = null;
+                ShowBalloon("Device Disconnected", "No iOS device connected.");
             };
 
             _watcher.Start();
@@ -195,9 +178,6 @@ namespace iDeviceInfo
             _tray.BalloonTipIcon  = ToolTipIcon.Info;
             _tray.ShowBalloonTip(4000);
         }
-
-        private void InvokeOnUI(Action action)
-            => _uiCtx.Post(_ => action(), null);
 
         // ── Cleanup ───────────────────────────────────────────────────────
 
