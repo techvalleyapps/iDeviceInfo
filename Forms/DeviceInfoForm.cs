@@ -53,7 +53,7 @@ namespace iDeviceInfo.Forms
             {
                 ("Device Name",    _info.DeviceName),
                 ("Model",          string.IsNullOrEmpty(_info.ModelName) ? _info.ProductType : _info.ModelName),
-                ("iOS Version",    _info.iOSVersion),
+                ("iOS Build",      _info.iOSVersion),
                 ("Serial Number",  _info.SerialNumber),
                 ("IMEI",           _info.IMEI),
                 ("Battery Level",  _info.BatteryLevel + (_info.IsCharging ? "  (Charging)" : "")),
