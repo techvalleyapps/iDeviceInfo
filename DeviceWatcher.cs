@@ -2,10 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
+using iDeviceInfo.Native;
 
 namespace iDeviceInfo
 {
@@ -16,6 +18,11 @@ namespace iDeviceInfo
     /// IAccessible return nothing.  Instead we read the LevelDB localStorage/
     /// sessionStorage files that QtWebEngine writes in real time — they contain a
     /// "BasicsData" JSON blob with every device field we need.
+    ///
+    /// To select the RIGHT blob, we subscribe to AMDeviceNotificationSubscribe so
+    /// we always know the serial of the physically-connected device.  That serial is
+    /// used to filter LevelDB blobs, preventing stale cached data from a previous
+    /// device from winning the "latest checkDate" race.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
     {
@@ -32,10 +39,39 @@ namespace iDeviceInfo
         private string _lastSerial = "";
         private bool   _scraping;
 
+        // AMD notification state:
+        //   _amdAvailable = false  → MobileDevice.dll absent; pure LevelDB checkDate fallback.
+        //   _amdAvailable = true:
+        //     _amdSerial == null   → AMD says no device is physically connected.
+        //     _amdSerial == ""     → Device connected but serial unreadable; checkDate fallback.
+        //     _amdSerial == "XYZ"  → Device connected, serial known; filter blobs by serial.
+        private bool             _amdAvailable;
+        private volatile string? _amdSerial;       // written on UI thread, read on thread-pool
+        private IntPtr           _amdSubscription = IntPtr.Zero;
+        private AMD.DeviceNotificationCallback? _amdCallback; // keep delegate alive; GC must not collect it
+
         // ── Public API ────────────────────────────────────────────────────
 
         public void Start()
         {
+            // Subscribe to AMDevice connect/disconnect events.
+            // Must be called after Application.Run() has started the Win32 message pump
+            // (AMDeviceNotificationSubscribe posts WM messages to deliver callbacks).
+            _amdCallback = OnAmdNotification;
+            try
+            {
+                int result = AMD.AMDeviceNotificationSubscribe(
+                    _amdCallback, 0, 0, IntPtr.Zero, out _amdSubscription);
+                _amdAvailable = (result == 0 && _amdSubscription != IntPtr.Zero);
+            }
+            catch
+            {
+                // MobileDevice.dll not installed (no iTunes / Apple Devices app).
+                // Degrade gracefully: pure LevelDB checkDate heuristic.
+                _amdAvailable    = false;
+                _amdSubscription = IntPtr.Zero;
+            }
+
             _timer = new System.Windows.Forms.Timer { Interval = 2000 };
             _timer.Tick += async (s, e) => await ScrapeAsync();
             _timer.Start();
@@ -44,6 +80,66 @@ namespace iDeviceInfo
 
         public void Restart() => _ = ScrapeAsync();
 
+        // ── AMD notification callback ─────────────────────────────────────
+
+        private void OnAmdNotification(ref AMD.DeviceCallbackInfo info, IntPtr cookie)
+        {
+            if (info.Message == AMD.MSG_CONNECTED)
+            {
+                _amdSerial = ReadSerialFromDevice(info.Device) ?? "";
+                _ = ScrapeAsync();
+            }
+            else if (info.Message == AMD.MSG_DISCONNECTED)
+            {
+                _amdSerial = null;
+                _ = ScrapeAsync();
+            }
+        }
+
+        /// <summary>
+        /// Reads SerialNumber directly from the iOS device via lockdown.
+        /// Returns null if the device is locked, not yet trusted, or any error occurs.
+        /// </summary>
+        private static string? ReadSerialFromDevice(IntPtr device)
+        {
+            try
+            {
+                if (AMD.AMDeviceConnect(device) != 0) return null;
+
+                // Try without a full lockdown session first (works if already trusted).
+                IntPtr keyRef = CF.ToCFString("SerialNumber");
+                IntPtr valRef = AMD.AMDeviceCopyValue(device, IntPtr.Zero, keyRef);
+                CF.CFRelease(keyRef);
+
+                if (valRef == IntPtr.Zero)
+                {
+                    // Need a full lockdown session.
+                    if (AMD.AMDeviceValidatePairing(device) != 0 ||
+                        AMD.AMDeviceStartSession(device)    != 0)
+                    {
+                        AMD.AMDeviceDisconnect(device);
+                        return null;
+                    }
+
+                    keyRef = CF.ToCFString("SerialNumber");
+                    valRef = AMD.AMDeviceCopyValue(device, IntPtr.Zero, keyRef);
+                    CF.CFRelease(keyRef);
+                    AMD.AMDeviceStopSession(device);
+                }
+
+                string? serial = null;
+                if (valRef != IntPtr.Zero)
+                {
+                    serial = CF.CFValueToString(valRef);
+                    CF.CFRelease(valRef);
+                }
+
+                AMD.AMDeviceDisconnect(device);
+                return string.IsNullOrEmpty(serial) ? null : serial;
+            }
+            catch { return null; }
+        }
+
         // ── Scraping ──────────────────────────────────────────────────────
 
         private async System.Threading.Tasks.Task ScrapeAsync()
@@ -51,10 +147,15 @@ namespace iDeviceInfo
             if (_scraping) return;
             _scraping = true;
 
+            // Snapshot AMD state on the UI thread before jumping to the thread pool.
+            bool    amdAvailable = _amdAvailable;
+            string? amdSerial    = _amdSerial;
+
             DeviceInfo? info;
             try
             {
-                info = await System.Threading.Tasks.Task.Run(() => TryScrape3uTools());
+                info = await System.Threading.Tasks.Task.Run(
+                    () => TryScrape3uTools(amdAvailable, amdSerial));
             }
             finally
             {
@@ -77,15 +178,19 @@ namespace iDeviceInfo
             }
         }
 
-        private static DeviceInfo? TryScrape3uTools()
+        private static DeviceInfo? TryScrape3uTools(bool amdAvailable, string? amdSerial)
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
             bool running = procs.Length > 0;
             foreach (var p in procs) p.Dispose();
             if (!running) return null;
 
+            // If AMD is available and definitively says no device is connected,
+            // don't let stale LevelDB data from a previous session report a ghost device.
+            if (amdAvailable && amdSerial == null) return null;
+
             List<string> texts = CollectFromLocalStorage();
-            return ParseDeviceInfo(texts);
+            return ParseDeviceInfo(texts, amdSerial);
         }
 
         // ── LevelDB reading ───────────────────────────────────────────────
@@ -176,15 +281,6 @@ namespace iDeviceInfo
             if (sb.Length >= minLen) yield return sb.ToString();
         }
 
-        // ── JSON field extraction ─────────────────────────────────────────
-        // 3uTools stores device data as a BasicsData JSON blob in localStorage.
-        // The blob may be split across multiple extracted strings (LevelDB records
-        // break at newlines), so we run the regexes against every string that
-        // looks JSON-like and take the first match found for each field.
-
-        // Each regex targets the *direct* JSON string value  "key":"value"
-        // (the key must end with :" to avoid matching nested object keys).
-
         // ── JSON field regexes ────────────────────────────────────────────
 
         private static readonly Regex ReCheckDate   = new(@"""checkDate""\s*:\s*""(\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2})""", RegexOptions.Compiled);
@@ -197,15 +293,56 @@ namespace iDeviceInfo
         private static readonly Regex ReBuildVer    = new(@"""buildver""\s*:\s*""([A-Z0-9]{3,10})""",    RegexOptions.Compiled);
         private static readonly Regex ReModelRead   = new(@"""key_model""\s*:\s*\{[^}]*?""read""\s*:\s*""([^""]{1,80})""", RegexOptions.Compiled);
 
-        private static DeviceInfo? ParseDeviceInfo(List<string> texts)
-        {
-            // LevelDB accumulates all historical scan records.
-            // Each "BasicsData" blob carries a "checkDate" timestamp.
-            // We find the string with the LATEST checkDate — that is the device
-            // currently shown in 3uTools — and extract fields from it alone.
-            // This prevents stale data from an earlier device contaminating results.
+        // ── JSON parsing ──────────────────────────────────────────────────
 
-            string? latestBlob  = null;
+        /// <summary>
+        /// Selects the correct device blob(s) from the LevelDB string pool and extracts
+        /// device fields from them.
+        ///
+        /// Root cause of the "old device shown on new connection" bug:
+        ///   3uTools refreshes cached scan records for ALL previously seen devices every
+        ///   time any device is checked — not just the active one.  This means the old
+        ///   device's LevelDB entry can receive a newer checkDate than the freshly
+        ///   connected device's entry, making "latest checkDate wins" unreliable.
+        ///
+        /// Fix:
+        ///   When we know the serial of the physically-connected device (via AMD), we
+        ///   filter blobs by that serial and ignore every other device's data entirely.
+        ///   We collect ALL blobs containing the serial, sort them newest-first, and
+        ///   pass them all to ExtractFields so fields truncated in a newer WAL entry are
+        ///   backfilled from an older complete blob.
+        /// </summary>
+        private static DeviceInfo? ParseDeviceInfo(List<string> texts, string? knownSerial = null)
+        {
+            if (!string.IsNullOrEmpty(knownSerial))
+            {
+                var blobsForSerial = texts
+                    .Where(t => t.Contains(knownSerial, StringComparison.Ordinal))
+                    .Select(t =>
+                    {
+                        var m  = ReCheckDate.Match(t);
+                        var dt = DateTime.MinValue;
+                        if (m.Success)
+                            DateTime.TryParseExact(
+                                m.Groups[1].Value, "MM/dd/yyyy HH:mm:ss",
+                                System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.None, out dt);
+                        return (blob: t, date: dt);
+                    })
+                    .OrderByDescending(x => x.date)
+                    .Select(x => x.blob)
+                    .ToList();
+
+                if (blobsForSerial.Count > 0)
+                    return ExtractFields(blobsForSerial);
+
+                // 3uTools hasn't scanned this device yet — return null so the timer retries.
+                return null;
+            }
+
+            // AMD serial unavailable (dll missing or device locked/untrusted).
+            // Fall back to the original "latest checkDate" heuristic.
+            string?  latestBlob = null;
             DateTime latestDate = DateTime.MinValue;
 
             foreach (string t in texts)
@@ -214,19 +351,17 @@ namespace iDeviceInfo
                 if (!m.Success) continue;
 
                 if (DateTime.TryParseExact(
-                        m.Groups[1].Value,
-                        "MM/dd/yyyy HH:mm:ss",
+                        m.Groups[1].Value, "MM/dd/yyyy HH:mm:ss",
                         System.Globalization.CultureInfo.InvariantCulture,
                         System.Globalization.DateTimeStyles.None,
                         out DateTime dt)
                     && dt > latestDate)
                 {
-                    latestDate  = dt;
-                    latestBlob  = t;
+                    latestDate = dt;
+                    latestBlob = t;
                 }
             }
 
-            // Extract from the freshest blob; fall back to scanning everything
             return ExtractFields(latestBlob != null
                 ? new List<string> { latestBlob }
                 : texts);
@@ -277,7 +412,15 @@ namespace iDeviceInfo
 
         // ── Debug dump ────────────────────────────────────────────────────
 
-        public static void DumpToFile()
+        /// <summary>Forwards the current AMD state into DumpToFile.</summary>
+        public void DumpWithAmdState() => DumpToFile(_amdAvailable, _amdSerial);
+
+        /// <summary>
+        /// Writes a debug file to the Desktop showing LevelDB strings, blob selection,
+        /// and the parsed result.  Pass amdSerial as reported by AMDevice for an
+        /// accurate picture; leave defaults to simulate the pre-fix checkDate path.
+        /// </summary>
+        public static void DumpToFile(bool amdAvailable = false, string? amdSerial = null)
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
             bool running = procs.Length > 0;
@@ -287,6 +430,8 @@ namespace iDeviceInfo
             {
                 $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
                 $"3uTools running: {running}",
+                $"AMD available:   {amdAvailable}",
+                $"AMD serial:      {amdSerial ?? "(none)"}",
                 ""
             };
 
@@ -296,25 +441,53 @@ namespace iDeviceInfo
             for (int i = 0; i < texts.Count; i++)
                 lines.Add($"[{i,4}] {texts[i]}");
 
-            // Show which blob was chosen as "latest"
             lines.Add("");
-            lines.Add("=== Latest BasicsData blob selected ===");
-            string? latestBlob = null;
-            DateTime latestDate = DateTime.MinValue;
-            foreach (string t in texts)
-            {
-                var m = ReCheckDate.Match(t);
-                if (m.Success && DateTime.TryParseExact(m.Groups[1].Value,
-                    "MM/dd/yyyy HH:mm:ss",
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.None, out DateTime dt) && dt > latestDate)
-                { latestDate = dt; latestBlob = t; }
-            }
-            lines.Add(latestBlob != null
-                ? $"checkDate: {latestDate:MM/dd/yyyy HH:mm:ss}  (first 200 chars: {latestBlob[..Math.Min(200, latestBlob.Length)]})"
-                : "(none found — will scan all strings)");
+            lines.Add($"=== Blob selection " +
+                      $"(knownSerial={(!string.IsNullOrEmpty(amdSerial) ? amdSerial : "null → checkDate fallback")}) ===");
 
-            var parsed = ParseDeviceInfo(texts);
+            if (!string.IsNullOrEmpty(amdSerial))
+            {
+                var matched = texts
+                    .Where(t => t.Contains(amdSerial, StringComparison.Ordinal))
+                    .Select(t =>
+                    {
+                        var m  = ReCheckDate.Match(t);
+                        var dt = DateTime.MinValue;
+                        if (m.Success)
+                            DateTime.TryParseExact(m.Groups[1].Value, "MM/dd/yyyy HH:mm:ss",
+                                System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.None, out dt);
+                        return (blob: t, date: dt);
+                    })
+                    .OrderByDescending(x => x.date)
+                    .ToList();
+
+                lines.Add($"Blobs matching serial '{amdSerial}': {matched.Count}");
+                foreach (var (blob, date) in matched)
+                    lines.Add($"  checkDate: {date:MM/dd/yyyy HH:mm:ss}  " +
+                              $"(first 160 chars: {blob[..Math.Min(160, blob.Length)]})");
+            }
+            else
+            {
+                string?  latestBlob = null;
+                DateTime latestDate = DateTime.MinValue;
+                foreach (string t in texts)
+                {
+                    var m = ReCheckDate.Match(t);
+                    if (m.Success && DateTime.TryParseExact(m.Groups[1].Value,
+                        "MM/dd/yyyy HH:mm:ss",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out DateTime dt)
+                        && dt > latestDate)
+                    { latestDate = dt; latestBlob = t; }
+                }
+                lines.Add(latestBlob != null
+                    ? $"Latest checkDate: {latestDate:MM/dd/yyyy HH:mm:ss}  " +
+                      $"(first 200 chars: {latestBlob[..Math.Min(200, latestBlob.Length)]})"
+                    : "(none found — will scan all strings)");
+            }
+
+            var parsed = ParseDeviceInfo(texts, amdSerial);
             lines.Add("");
             lines.Add("=== Parser result ===");
             if (parsed == null)
@@ -358,6 +531,11 @@ namespace iDeviceInfo
             _disposed = true;
             _timer?.Stop();
             _timer?.Dispose();
+            if (_amdSubscription != IntPtr.Zero)
+            {
+                try { AMD.AMDeviceNotificationUnsubscribe(_amdSubscription); } catch { }
+                _amdSubscription = IntPtr.Zero;
+            }
         }
     }
 }

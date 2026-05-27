@@ -50,7 +50,7 @@ namespace iDeviceInfo
             refreshItem.Click += (s, e) => _watcher!.Restart();
 
             var debugItem = new ToolStripMenuItem("Debug: Dump 3uTools Text");
-            debugItem.Click += (_, _) => DeviceWatcher.DumpToFile();
+            debugItem.Click += (_, _) => _watcher.DumpWithAmdState();
 
             menu.Items.Add(showItem);
             menu.Items.Add(refreshItem);
