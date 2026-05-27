@@ -7,8 +7,9 @@ namespace iDeviceInfo.Native
     /// P/Invoke wrappers for Apple's MobileDevice.dll.
     /// Located at: C:\Program Files\Common Files\Apple\Mobile Device Support\MobileDevice.dll
     ///
-    /// This is the same library iTunes and 3uTools use to communicate with iOS devices.
-    /// Requires Apple Mobile Device Service to be running (installed with iTunes/Apple Devices).
+    /// Works with both the iTunes (v12.x) and Apple Devices app (v1818+) versions.
+    /// The Apple Devices app version no longer delivers AMDeviceNotificationSubscribe
+    /// callbacks via the Win32 message pump, so we use AMDCreateDeviceList polling instead.
     /// </summary>
     internal static class AMD
     {
@@ -37,7 +38,26 @@ namespace iDeviceInfo.Native
         public delegate void DeviceNotificationCallback(
             ref DeviceCallbackInfo info, IntPtr cookie);
 
-        // ── Notification Subscription ─────────────────────────────────────
+        // ── Device Enumeration (Apple Devices app / v1818+) ───────────────
+
+        /// <summary>
+        /// Returns a CFArrayRef containing AMDeviceRef objects for all currently
+        /// connected devices known to the Apple Mobile Device Service.
+        /// Caller must CFRelease the returned array.
+        /// This is the reliable alternative to the notification callback in newer DLL versions.
+        /// </summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr AMDCreateDeviceList();
+
+        /// <summary>
+        /// Returns a CFStringRef containing the device's UDID.
+        /// Does not require AMDeviceConnect or a lockdown session.
+        /// Caller must CFRelease the returned string.
+        /// </summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr AMDeviceCopyDeviceIdentifier(IntPtr device);
+
+        // ── Notification Subscription (iTunes / legacy) ───────────────────
 
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern int AMDeviceNotificationSubscribe(
@@ -73,36 +93,18 @@ namespace iDeviceInfo.Native
 
         /// <summary>
         /// Reads a value from the device lockdown service.
-        /// domain: pass IntPtr.Zero for the default domain, or a CFStringRef for a specific domain
-        ///         (e.g. "com.apple.mobile.battery").
+        /// domain: IntPtr.Zero for the default domain, or a CFStringRef (e.g. "com.apple.mobile.battery").
         /// key: CFStringRef for the key name.
-        /// Returns a CFTypeRef (CFString, CFNumber, or CFBoolean). Caller must CFRelease.
+        /// Returns a CFTypeRef. Caller must CFRelease.
         /// </summary>
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr AMDeviceCopyValue(
             IntPtr device,
-            IntPtr domain,   // CFStringRef or IntPtr.Zero
-            IntPtr key);     // CFStringRef
+            IntPtr domain,
+            IntPtr key);
 
-        // ── Service Start ─────────────────────────────────────────────────
+        // ── Misc ──────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Starts a lockdown service on the device (e.g. diagnostics relay).
-        /// serviceHandle receives a socket/SSL handle on success.
-        /// </summary>
-        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int AMDeviceStartService(
-            IntPtr device,
-            IntPtr serviceName,    // CFStringRef
-            out IntPtr serviceHandle,
-            IntPtr unknown);       // pass IntPtr.Zero
-
-        // ── Run Loop ──────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Pumps the CoreFoundation run loop so device notifications are delivered.
-        /// Call this in a background thread loop.
-        /// </summary>
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern void AMDSetLogLevel(int level);
     }
