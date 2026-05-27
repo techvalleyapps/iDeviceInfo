@@ -45,6 +45,12 @@ namespace iDeviceInfo
         // Only touched on the UI thread, so no lock needed.
         private readonly Dictionary<IntPtr, string> _handleToSerial = new();
 
+        // ── Diagnostics (visible in debug dump) ───────────────────────────
+        private int     _callbackFireCount;   // total OnAmdNotification invocations
+        private uint    _lastCallbackMsg;     // last message type received
+        private int     _lastConnectResult;   // last AMDeviceConnect() return value
+        private string? _lastReadException;   // last exception text from ReadAllDeviceFields
+
         // ── Lifecycle ─────────────────────────────────────────────────────
 
         /// <summary>
@@ -83,7 +89,7 @@ namespace iDeviceInfo
         {
             foreach (var (handle, _) in _handleToSerial.ToList())
             {
-                DeviceInfo? di = ReadAllDeviceFields(handle);
+                DeviceInfo? di = ReadAllDeviceFields(handle, out _);
                 if (di != null)
                 {
                     _handleToSerial[handle] = di.SerialNumber;
@@ -105,9 +111,14 @@ namespace iDeviceInfo
             IntPtr device = info.Device;
             uint   msg    = info.Message;
 
+            _callbackFireCount++;
+            _lastCallbackMsg = msg;
+
             if (msg == AMD.MSG_CONNECTED)
             {
-                DeviceInfo? di = ReadAllDeviceFields(device);
+                DeviceInfo? di = ReadAllDeviceFields(device, out int connectResult);
+                _lastConnectResult = connectResult;
+
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
                 _handleToSerial[device] = di.SerialNumber;
@@ -123,17 +134,19 @@ namespace iDeviceInfo
             }
         }
 
-        // ── Device field reading (runs on thread pool) ────────────────────
+        // ── Device field reading ──────────────────────────────────────────
 
-        private static DeviceInfo? ReadAllDeviceFields(IntPtr device)
+        private DeviceInfo? ReadAllDeviceFields(IntPtr device, out int connectResult)
         {
+            connectResult = -1;
             try
             {
-                if (AMD.AMDeviceConnect(device) != 0) return null;
+                connectResult = AMD.AMDeviceConnect(device);
+                if (connectResult != 0) return null;
 
                 var info = new DeviceInfo();
 
-                // ── Basic fields (no lockdown session required on a trusted device) ──
+                // ── Basic fields — may work without a full lockdown session ──────
                 info.DeviceName   = ReadKey(device, null, "DeviceName")     ?? "Unknown Device";
                 info.SerialNumber = ReadKey(device, null, "SerialNumber")   ?? "";
                 info.UDID         = ReadKey(device, null, "UniqueDeviceID") ?? "";
@@ -141,11 +154,25 @@ namespace iDeviceInfo
                 info.iOSVersion   = ReadKey(device, null, "ProductVersion") ?? "";
                 info.ModelName    = LookupModelName(info.ProductType);
 
-                // ── Privileged fields (need a paired lockdown session) ────────────
+                // ── Privileged fields — require a paired lockdown session ────────
                 bool sessionOk = AMD.AMDeviceValidatePairing(device) == 0 &&
                                  AMD.AMDeviceStartSession(device)    == 0;
                 if (sessionOk)
                 {
+                    // Retry basic fields that may have been empty without a session
+                    if (string.IsNullOrEmpty(info.SerialNumber))
+                        info.SerialNumber = ReadKey(device, null, "SerialNumber") ?? "";
+                    if (string.IsNullOrEmpty(info.UDID))
+                        info.UDID = ReadKey(device, null, "UniqueDeviceID") ?? "";
+                    if (string.IsNullOrEmpty(info.ProductType))
+                        info.ProductType = ReadKey(device, null, "ProductType") ?? "";
+                    if (string.IsNullOrEmpty(info.iOSVersion))
+                        info.iOSVersion = ReadKey(device, null, "ProductVersion") ?? "";
+                    if (info.DeviceName == "Unknown Device")
+                        info.DeviceName = ReadKey(device, null, "DeviceName") ?? "Unknown Device";
+                    if (string.IsNullOrEmpty(info.ModelName))
+                        info.ModelName = LookupModelName(info.ProductType);
+
                     string? imei = ReadKey(device, null,
                         "InternationalMobileEquipmentIdentity");
                     if (!string.IsNullOrEmpty(imei)) info.IMEI = imei;
@@ -170,8 +197,9 @@ namespace iDeviceInfo
                 AMD.AMDeviceDisconnect(device);
                 return string.IsNullOrEmpty(info.SerialNumber) ? null : info;
             }
-            catch
+            catch (Exception ex)
             {
+                _lastReadException = ex.Message;
                 try { AMD.AMDeviceDisconnect(device); } catch { /* ignore */ }
                 return null;
             }
@@ -350,17 +378,30 @@ namespace iDeviceInfo
 
         public void DumpWithAmdState()
         {
+            string lastMsgName = _lastCallbackMsg switch
+            {
+                AMD.MSG_CONNECTED    => "MSG_CONNECTED",
+                AMD.MSG_DISCONNECTED => "MSG_DISCONNECTED",
+                AMD.MSG_PAIRED       => "MSG_PAIRED",
+                0                    => "(none yet)",
+                _                    => $"unknown(0x{_lastCallbackMsg:X})"
+            };
+
             var lines = new List<string>
             {
                 $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                $"AMD subscription active: {_amdSubscription != IntPtr.Zero}",
+                $"AMD subscription active:  {_amdSubscription != IntPtr.Zero}",
+                $"Callback fired count:     {_callbackFireCount}",
+                $"Last callback message:    {lastMsgName}",
+                $"Last AMDeviceConnect():   0x{_lastConnectResult:X8}{(_lastConnectResult == 0 ? " (OK)" : " (FAILED)")}",
+                $"Last read exception:      {_lastReadException ?? "(none)"}",
                 $"Connected device handles: {_handleToSerial.Count}",
                 ""
             };
 
             if (_handleToSerial.Count == 0)
             {
-                lines.Add("No devices currently tracked.");
+                lines.Add("No devices currently tracked (callback never fired, or all reads failed).");
             }
             else
             {
@@ -368,26 +409,27 @@ namespace iDeviceInfo
                 foreach (var (handle, serial) in _handleToSerial)
                 {
                     lines.Add($"── Device {idx++} ─────────────────────────────────────────────");
-                    lines.Add($"   Handle:        0x{handle:X}");
+                    lines.Add($"   Handle:          0x{handle:X}");
                     lines.Add($"   Serial (cached): {serial}");
 
-                    DeviceInfo? di = ReadAllDeviceFields(handle);
+                    DeviceInfo? di = ReadAllDeviceFields(handle, out int cr);
+                    lines.Add($"   AMDeviceConnect: 0x{cr:X8}{(cr == 0 ? " (OK)" : " (FAILED)")}");
                     if (di != null)
                     {
-                        lines.Add($"   DeviceName:    {di.DeviceName}");
-                        lines.Add($"   ModelName:     {di.ModelName}");
-                        lines.Add($"   ProductType:   {di.ProductType}");
-                        lines.Add($"   iOSVersion:    {di.iOSVersion}");
-                        lines.Add($"   SerialNumber:  {di.SerialNumber}");
-                        lines.Add($"   IMEI:          {di.IMEI}");
-                        lines.Add($"   IMEI2:         {di.IMEI2}");
-                        lines.Add($"   BatteryLevel:  {di.BatteryLevel}");
-                        lines.Add($"   IsCharging:    {di.IsCharging}");
-                        lines.Add($"   UDID:          {di.UDID}");
+                        lines.Add($"   DeviceName:      {di.DeviceName}");
+                        lines.Add($"   ModelName:       {di.ModelName}");
+                        lines.Add($"   ProductType:     {di.ProductType}");
+                        lines.Add($"   iOSVersion:      {di.iOSVersion}");
+                        lines.Add($"   SerialNumber:    {di.SerialNumber}");
+                        lines.Add($"   IMEI:            {di.IMEI}");
+                        lines.Add($"   IMEI2:           {di.IMEI2}");
+                        lines.Add($"   BatteryLevel:    {di.BatteryLevel}");
+                        lines.Add($"   IsCharging:      {di.IsCharging}");
+                        lines.Add($"   UDID:            {di.UDID}");
                     }
                     else
                     {
-                        lines.Add("   (could not re-read device fields — device may have locked)");
+                        lines.Add($"   (read failed — exception: {_lastReadException ?? "none"})");
                     }
                     lines.Add("");
                 }
