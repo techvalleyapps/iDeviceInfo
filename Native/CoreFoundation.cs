@@ -56,6 +56,14 @@ namespace iDeviceInfo.Native
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern long CFBooleanGetTypeID();
 
+        // ── Array ─────────────────────────────────────────────────────────
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern long CFArrayGetCount(IntPtr array);
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr CFArrayGetValueAtIndex(IntPtr array, long index);
+
         // ── Release ───────────────────────────────────────────────────────
 
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
