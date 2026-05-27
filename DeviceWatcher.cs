@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using iDeviceInfo.Native;
 
@@ -42,7 +40,6 @@ namespace iDeviceInfo
         private bool                            _disposed;
         private IntPtr                          _amdSubscription = IntPtr.Zero;
         private AMD.DeviceNotificationCallback? _amdCallback;     // pinned — GC must not collect
-        private SynchronizationContext?         _syncCtx;         // WinForms UI context
 
         // Maps live device handle (AMDeviceRef) → SerialNumber.
         // Only touched on the UI thread, so no lock needed.
@@ -56,10 +53,6 @@ namespace iDeviceInfo
         /// </summary>
         public void Start()
         {
-            // Capture the WinForms synchronisation context so background reads
-            // can marshal their results back to the UI thread.
-            _syncCtx = SynchronizationContext.Current ?? new SynchronizationContext();
-
             _amdCallback = OnAmdNotification;
             try
             {
@@ -89,50 +82,45 @@ namespace iDeviceInfo
         public void Restart()
         {
             foreach (var (handle, _) in _handleToSerial.ToList())
-                BeginReadAndFire(handle);
+            {
+                DeviceInfo? di = ReadAllDeviceFields(handle);
+                if (di != null)
+                {
+                    _handleToSerial[handle] = di.SerialNumber;
+                    DeviceConnected?.Invoke(this, di);
+                }
+            }
         }
 
         // ── AMD notification callback (runs on WinForms message pump) ─────
+        //
+        // IMPORTANT: Apple's AMD and CoreFoundation APIs must be called from a
+        // thread that owns a CoreFoundation RunLoop — the WinForms UI thread
+        // satisfies this.  Do NOT marshal these calls to the thread pool; doing
+        // so causes AMDeviceConnect to silently fail and return non-zero.
+        // ReadAllDeviceFields typically completes in < 2 seconds on first connect.
 
         private void OnAmdNotification(ref AMD.DeviceCallbackInfo info, IntPtr cookie)
         {
-            IntPtr device = info.Device;   // copy value — ref struct is stack-only
+            IntPtr device = info.Device;
             uint   msg    = info.Message;
 
             if (msg == AMD.MSG_CONNECTED)
             {
-                // Do the slow lockdown read on a thread-pool thread so we never
-                // stall the WinForms message pump (and therefore AMD callbacks).
-                BeginReadAndFire(device);
+                DeviceInfo? di = ReadAllDeviceFields(device);
+                if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
+
+                _handleToSerial[device] = di.SerialNumber;
+                DeviceConnected?.Invoke(this, di);
             }
             else if (msg == AMD.MSG_DISCONNECTED)
             {
-                // Disconnect is instant — no lockdown I/O needed.
                 if (_handleToSerial.TryGetValue(device, out string? serial))
                 {
                     _handleToSerial.Remove(device);
                     DeviceDisconnected?.Invoke(this, serial);
                 }
             }
-        }
-
-        /// <summary>
-        /// Reads all device fields on the thread pool, then marshals back to the
-        /// UI thread to update _handleToSerial and fire DeviceConnected.
-        /// </summary>
-        private void BeginReadAndFire(IntPtr device)
-        {
-            Task.Run(() =>
-            {
-                DeviceInfo? di = ReadAllDeviceFields(device);
-                if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
-
-                _syncCtx!.Post(_ =>
-                {
-                    _handleToSerial[device] = di.SerialNumber;
-                    DeviceConnected?.Invoke(this, di);
-                }, null);
-            });
         }
 
         // ── Device field reading (runs on thread pool) ────────────────────
