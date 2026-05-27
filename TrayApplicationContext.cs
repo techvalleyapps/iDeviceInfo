@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
 using System.Windows.Forms;
 using iDeviceInfo.Forms;
 
@@ -8,137 +10,230 @@ namespace iDeviceInfo
 {
     /// <summary>
     /// Main application context. Manages the system tray icon, device watcher,
-    /// and the popup DeviceInfoForm.
+    /// and the popup DeviceInfoForm. Supports multiple simultaneously-connected devices.
     /// </summary>
     public sealed class TrayApplicationContext : ApplicationContext
     {
-        private readonly NotifyIcon          _tray;
-        private readonly DeviceWatcher       _watcher;
-        private readonly FloatingCopyButton  _floatingBtn;
-        private DeviceInfo?                  _lastDevice;
-        private DeviceInfoForm?              _popup;
+        // ── Core objects ──────────────────────────────────────────────────
+
+        private readonly NotifyIcon         _tray;
+        private readonly DeviceWatcher      _watcher;
+        private readonly FloatingCopyButton _floatingBtn;
+
+        // ── Per-device tracking ───────────────────────────────────────────
+
+        // serial → DeviceInfo for all currently-connected devices
+        private readonly Dictionary<string, DeviceInfo>        _devices   = new(StringComparer.OrdinalIgnoreCase);
+        // serial → tray menu item so we can remove it cleanly on disconnect
+        private readonly Dictionary<string, ToolStripMenuItem> _menuItems = new(StringComparer.OrdinalIgnoreCase);
+
+        // Most-recently connected device — used for left-click tray action
+        private string? _lastSerial;
+        // The currently open popup and which device serial it is showing
+        private DeviceInfoForm? _popup;
+        private string?         _popupSerial;
+
+        // ── Menu structural items ─────────────────────────────────────────
+
+        private readonly ToolStripSeparator _deviceSeparator; // device items go above this
+        private readonly ToolStripMenuItem  _refreshItem;
+        private readonly ToolStripMenuItem  _debugItem;
+
+        // ─────────────────────────────────────────────────────────────────
 
         public TrayApplicationContext()
         {
-            // ── Floating Copy All button (shows above taskbar when 3uTools runs)
+            // ── Floating Copy All button ───────────────────────────────────
             _floatingBtn = new FloatingCopyButton();
 
-            // ── Tray icon ─────────────────────────────────────────────────
+            // ── Tray icon ──────────────────────────────────────────────────
             _tray = new NotifyIcon
             {
-                Icon    = BuildTrayIcon(hasDevice: false),
+                Icon    = BuildTrayIcon(connected: false),
                 Text    = "iDeviceInfo — No device connected",
                 Visible = true
             };
 
+            // ── Context menu layout ────────────────────────────────────────
+            //
+            //   [📱 Device Name]       ← inserted dynamically above separator
+            //   [📱 Device Name 2]     ← inserted dynamically above separator
+            //   ──────────────────
+            //   Refresh Devices
+            //   Debug: Dump Info
+            //   ──────────────────
+            //   Exit
+
             var menu = new ContextMenuStrip();
-            var showItem = new ToolStripMenuItem("Show Device Info")
-            {
-                Enabled = false,
-                Font    = new Font("Segoe UI", 9f, FontStyle.Bold)
-            };
-            var exitItem = new ToolStripMenuItem("Exit");
 
-            showItem.Click += (_, _) => ShowPopup();
-            exitItem.Click += (_, _) =>
-            {
-                _tray.Visible = false;
-                Application.Exit();
-            };
+            _deviceSeparator = new ToolStripSeparator();
+            _refreshItem     = new ToolStripMenuItem("Refresh Devices");
+            _debugItem       = new ToolStripMenuItem("Debug: Dump Device Info");
+            var exitItem     = new ToolStripMenuItem("Exit");
 
-            var refreshItem = new ToolStripMenuItem("Refresh Device");
-            refreshItem.Click += (s, e) => _watcher!.Restart();
+            _refreshItem.Click += (_, _) => _watcher.Restart();
+            _debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
+            exitItem.Click     += (_, _) => { _tray.Visible = false; Application.Exit(); };
 
-            var debugItem = new ToolStripMenuItem("Debug: Dump 3uTools Text");
-            debugItem.Click += (_, _) => _watcher.DumpWithAmdState();
-
-            menu.Items.Add(showItem);
-            menu.Items.Add(refreshItem);
-            menu.Items.Add(debugItem);
+            menu.Items.Add(_deviceSeparator);
+            menu.Items.Add(_refreshItem);
+            menu.Items.Add(_debugItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
+
             _tray.ContextMenuStrip = menu;
 
-            // Left-click also shows popup
+            // Left-click → show popup for most-recently connected device
             _tray.MouseClick += (_, e) =>
             {
-                if (e.Button == MouseButtons.Left)
-                    ShowPopup();
+                if (e.Button == MouseButtons.Left && _lastSerial != null)
+                    ShowPopup(_lastSerial);
             };
 
-            // ── Device watcher ────────────────────────────────────────────
+            // ── Device watcher ─────────────────────────────────────────────
             _watcher = new DeviceWatcher();
 
-            // Callbacks arrive on the UI thread (WinForms message pump)
-            // so no InvokeOnUI marshalling needed
             _watcher.DeviceConnected += (_, info) =>
             {
-                _lastDevice = info;
+                string serial = info.SerialNumber;
+                bool   isNew  = !_devices.ContainsKey(serial);
+
+                _devices[serial] = info;
+                _lastSerial      = serial;
+
+                if (isNew)
+                    AddDeviceMenuItem(serial, info.DeviceName);
+                else
+                    UpdateDeviceMenuItem(serial, info.DeviceName);
+
                 _floatingBtn.UpdateDevice(info);
-                UpdateTrayIcon(connected: true);
-                showItem.Enabled = true;
-                _tray.Text = $"iDeviceInfo — {info.DeviceName}";
-                ShowBalloon("Device Connected", info.DeviceName);
-                ShowPopup();
+                UpdateTrayState();
+
+                if (isNew)
+                {
+                    ShowBalloon("Device Connected", info.DeviceName);
+                    ShowPopup(serial);
+                }
+                else if (_popupSerial == serial)
+                {
+                    // Refresh triggered — reopen popup with fresh data
+                    ShowPopup(serial);
+                }
             };
 
-            _watcher.DeviceDisconnected += (_, _) =>
+            _watcher.DeviceDisconnected += (_, serial) =>
             {
-                _lastDevice = null;
-                _floatingBtn.UpdateDevice(null);
-                UpdateTrayIcon(connected: false);
-                showItem.Enabled = false;
-                _tray.Text = "iDeviceInfo — No device connected";
-                _popup?.Close();
-                _popup = null;
-                ShowBalloon("Device Disconnected", "No iOS device connected.");
+                if (!_devices.TryGetValue(serial, out DeviceInfo? info)) return;
+
+                _devices.Remove(serial);
+                RemoveDeviceMenuItem(serial);
+
+                // Close the popup if it was showing this specific device
+                if (_popupSerial == serial)
+                {
+                    _popup?.Close();
+                    _popup       = null;
+                    _popupSerial = null;
+                }
+
+                // Pick another connected device as the "last" one, or clear
+                if (_lastSerial == serial)
+                    _lastSerial = _devices.Count > 0 ? _devices.Keys.First() : null;
+
+                _floatingBtn.UpdateDevice(
+                    _lastSerial != null ? _devices[_lastSerial] : null);
+
+                UpdateTrayState();
+                ShowBalloon("Device Disconnected", $"{info.DeviceName} disconnected.");
             };
 
-            // Delay Start() until AFTER Application.Run() has started the message pump.
+            // Delay Start() until AFTER Application.Run() starts the message pump.
             // AMDeviceNotificationSubscribe needs the pump live to deliver callbacks.
             EventHandler? onIdle = null;
-            onIdle = (s, e) =>
+            onIdle = (_, _) =>
             {
-                Application.Idle -= onIdle!; // one-shot
+                Application.Idle -= onIdle!;
                 _watcher.Start();
             };
             Application.Idle += onIdle;
 
-            // Show a brief startup balloon
+            // Startup balloon
             _tray.BalloonTipTitle = "iDeviceInfo";
             _tray.BalloonTipText  = "Running in the system tray. Connect an iOS device to begin.";
             _tray.BalloonTipIcon  = ToolTipIcon.Info;
             _tray.ShowBalloonTip(3000);
         }
 
+        // ── Dynamic device menu items ─────────────────────────────────────
+
+        private void AddDeviceMenuItem(string serial, string deviceName)
+        {
+            var item = new ToolStripMenuItem($"📱  {deviceName}")
+            {
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+            item.Click += (_, _) => ShowPopup(serial);
+            _menuItems[serial] = item;
+
+            // Insert above the structural separator so device items stay at top
+            int idx = _tray.ContextMenuStrip!.Items.IndexOf(_deviceSeparator);
+            _tray.ContextMenuStrip.Items.Insert(idx, item);
+        }
+
+        private void UpdateDeviceMenuItem(string serial, string deviceName)
+        {
+            if (_menuItems.TryGetValue(serial, out var item))
+                item.Text = $"📱  {deviceName}";
+        }
+
+        private void RemoveDeviceMenuItem(string serial)
+        {
+            if (!_menuItems.TryGetValue(serial, out var item)) return;
+            _tray.ContextMenuStrip!.Items.Remove(item);
+            item.Dispose();
+            _menuItems.Remove(serial);
+        }
+
         // ── Popup ─────────────────────────────────────────────────────────
 
-        private void ShowPopup()
+        private void ShowPopup(string serial)
         {
-            if (_lastDevice == null) return;
+            if (!_devices.TryGetValue(serial, out DeviceInfo? info)) return;
 
-            // Close any existing popup
             if (_popup != null && !_popup.IsDisposed)
             {
                 _popup.Close();
                 _popup.Dispose();
             }
 
-            _popup = new DeviceInfoForm(_lastDevice);
+            _popup       = new DeviceInfoForm(info);
+            _popupSerial = serial;
+            _popup.FormClosed += (_, _) => { _popupSerial = null; };
             _popup.Show();
             _popup.Activate();
         }
 
-        // ── Tray icon builder ─────────────────────────────────────────────
+        // ── Tray icon + tooltip ───────────────────────────────────────────
 
-        private void UpdateTrayIcon(bool connected)
+        private void UpdateTrayState()
         {
+            bool connected = _devices.Count > 0;
+
             var oldIcon = _tray.Icon;
             _tray.Icon = BuildTrayIcon(connected);
             oldIcon?.Dispose();
+
+            _tray.Text = _devices.Count switch
+            {
+                0 => "iDeviceInfo — No device connected",
+                1 => $"iDeviceInfo — {_devices.Values.First().DeviceName}",
+                _ => $"iDeviceInfo — {_devices.Count} devices connected"
+            };
         }
 
-        private static Icon BuildTrayIcon(bool hasDevice)
+        // ── Tray icon drawing ─────────────────────────────────────────────
+
+        private static Icon BuildTrayIcon(bool connected)
         {
             const int size = 16;
             using var bmp = new Bitmap(size, size);
@@ -148,29 +243,23 @@ namespace iDeviceInfo
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             g.Clear(Color.Transparent);
 
-            // Phone body
-            var bodyColor = hasDevice
-                ? Color.FromArgb(10, 132, 255)  // iOS blue when connected
-                : Color.FromArgb(130, 130, 130); // grey when idle
+            var bodyColor = connected
+                ? Color.FromArgb(10, 132, 255)   // iOS blue when connected
+                : Color.FromArgb(130, 130, 130);  // grey when idle
 
-            using var bodyBrush  = new SolidBrush(bodyColor);
-
-            // Rounded rectangle as phone body
+            using var bodyBrush = new SolidBrush(bodyColor);
             float x = 3, y = 1, w = 10, h = 14, r = 2.5f;
             using var path = RoundedRect(x, y, w, h, r);
             g.FillPath(bodyBrush, path);
 
-            // Screen area (white rectangle inside)
             using var screenBrush = new SolidBrush(
-                hasDevice ? Color.FromArgb(200, 235, 255) : Color.FromArgb(80, 80, 80));
+                connected ? Color.FromArgb(200, 235, 255) : Color.FromArgb(80, 80, 80));
             g.FillRectangle(screenBrush, x + 1.5f, y + 2, w - 3, h - 5.5f);
 
-            // Home indicator line (bottom of screen)
             using var linePen = new Pen(bodyColor, 1.5f);
             g.DrawLine(linePen, x + 3.5f, y + h - 2, x + w - 3.5f, y + h - 2);
 
-            // Green dot when connected
-            if (hasDevice)
+            if (connected)
             {
                 using var dotBrush = new SolidBrush(Color.FromArgb(52, 199, 89));
                 g.FillEllipse(dotBrush, 10, 10, 6, 6);
@@ -183,10 +272,10 @@ namespace iDeviceInfo
         private static GraphicsPath RoundedRect(float x, float y, float w, float h, float r)
         {
             var path = new GraphicsPath();
-            path.AddArc(x, y, r * 2, r * 2, 180, 90);
-            path.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
-            path.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
-            path.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
+            path.AddArc(x,             y,             r * 2, r * 2, 180, 90);
+            path.AddArc(x + w - r * 2, y,             r * 2, r * 2, 270, 90);
+            path.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2,   0, 90);
+            path.AddArc(x,             y + h - r * 2, r * 2, r * 2,  90, 90);
             path.CloseFigure();
             return path;
         }
