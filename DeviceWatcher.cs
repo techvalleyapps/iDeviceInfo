@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using iDeviceInfo.Native;
 
@@ -10,13 +12,14 @@ namespace iDeviceInfo
     /// <summary>
     /// Detects and reads iOS device information directly via Apple's MobileDevice.dll.
     ///
-    /// Detection strategy (Apple Devices app v1818+ compatible):
-    ///   Primary  — AMDCreateDeviceList() polled every 2 s from the WinForms timer.
-    ///              Reliable on all DLL versions; connects/disconnects detected within ~2 s.
-    ///   Bonus    — AMDeviceNotificationSubscribe() for instant response on older iTunes DLL.
-    ///              Silently ignored if the DLL doesn't deliver callbacks (v1818 behaviour).
+    /// Apple Devices app (v1818+) delivers AMD notification callbacks to the thread
+    /// that called AMDeviceNotificationSubscribe — but only if that thread is actively
+    /// pumping a Win32 message loop.  We therefore run a dedicated background STA
+    /// thread whose sole job is to subscribe and dispatch messages.  When a callback
+    /// arrives we marshal back to the WinForms UI thread via SynchronizationContext
+    /// before reading device fields or firing any events.
     ///
-    /// Events always fire on the WinForms UI thread (safe to touch controls directly).
+    /// Events always fire on the WinForms UI thread.
     /// Does NOT depend on 3uTools or any LevelDB scraping.
     /// </summary>
     public sealed class DeviceWatcher : IDisposable
@@ -29,36 +32,99 @@ namespace iDeviceInfo
         /// <summary>Fired when a device disconnects. Arg = SerialNumber.</summary>
         public event EventHandler<string>? DeviceDisconnected;
 
+        // ── Win32 message loop P/Invokes (used on the AMD thread) ─────────
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSG
+        {
+            public IntPtr hwnd, wParam, lParam;
+            public uint   message, time;
+            public int    ptX, ptY;
+        }
+
+        [DllImport("user32.dll")] private static extern int  GetMessage(out MSG m, IntPtr h, uint f, uint l);
+        [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG m);
+        [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG m);
+        [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint id, uint msg, IntPtr w, IntPtr l);
+
+        private const uint WM_QUIT = 0x0012;
+
         // ── State ─────────────────────────────────────────────────────────
 
         private bool _disposed;
 
-        // Polling timer — primary detection path
-        private System.Windows.Forms.Timer? _pollTimer;
+        // UI-thread sync context (captured in Start)
+        private SynchronizationContext? _uiCtx;
 
-        // serial → cached DeviceInfo for connected devices
+        // Background AMD thread
+        private Thread? _amdThread;
+        private uint    _amdThreadId;
+        private readonly ManualResetEventSlim _amdReady = new(false);
+
+        // AMD subscription — owned by the AMD thread
+        private IntPtr                          _amdSubscription = IntPtr.Zero;
+        private AMD.DeviceNotificationCallback? _amdCallback;     // keep alive
+
+        // Per-device state — only accessed on the UI thread
+        // serial → DeviceInfo
         private readonly Dictionary<string, DeviceInfo> _connected =
             new(StringComparer.OrdinalIgnoreCase);
-
-        // AMD notification subscription — bonus path (may never fire on v1818)
-        private IntPtr                          _amdSubscription = IntPtr.Zero;
-        private AMD.DeviceNotificationCallback? _amdCallback;
+        // device handle → serial (for disconnect correlation)
+        private readonly Dictionary<IntPtr, string> _handleToSerial = new();
 
         // ── Diagnostics ───────────────────────────────────────────────────
-        private int     _pollCount;
         private int     _callbackFireCount;
-        private string? _lastPollException;
+        private uint    _lastCallbackMsg;
         private string? _lastReadException;
 
         // ── Lifecycle ─────────────────────────────────────────────────────
 
-        /// <summary>
-        /// Start polling and (optionally) subscribe to AMD notifications.
-        /// Must be called after Application.Run() has started the message pump.
-        /// </summary>
         public void Start()
         {
-            // ── Bonus: AMD notification callback (instant on old iTunes DLL) ──
+            _uiCtx = SynchronizationContext.Current
+                  ?? new SynchronizationContext();
+
+            // Launch the dedicated AMD listener thread
+            _amdThread = new Thread(AmdThreadEntry)
+            {
+                IsBackground = true,
+                Name         = "iDeviceInfo-AMD"
+            };
+            _amdThread.SetApartmentState(ApartmentState.STA);
+            _amdThread.Start();
+
+            // Wait up to 3 s for the thread to subscribe before returning
+            _amdReady.Wait(3000);
+        }
+
+        /// <summary>Force an immediate re-read of all tracked devices (Refresh menu).</summary>
+        public void Restart()
+        {
+            // Re-read every currently tracked device and re-fire DeviceConnected
+            foreach (var (handle, serial) in _handleToSerial.ToList())
+            {
+                DeviceInfo? di = ReadAllDeviceFields(handle);
+                if (di != null)
+                {
+                    _connected[di.SerialNumber] = di;
+                    DeviceConnected?.Invoke(this, di);
+                }
+            }
+        }
+
+        // ── AMD thread ────────────────────────────────────────────────────
+
+        private void AmdThreadEntry()
+        {
+            // Record the Win32 thread ID so we can post WM_QUIT on dispose
+            _amdThreadId = (uint)AppDomain.CurrentDomain
+                .GetData("___amdThreadId_placeholder") is null
+                ? GetCurrentThreadId()
+                : 0;
+            _amdThreadId = GetCurrentThreadId();
+
+            // Subscribe — must be called from THIS thread so callbacks are
+            // delivered here via the message loop below
             _amdCallback = OnAmdNotification;
             try
             {
@@ -66,115 +132,68 @@ namespace iDeviceInfo
                     _amdCallback, 0, 0, IntPtr.Zero, out _amdSubscription);
                 if (r != 0) _amdSubscription = IntPtr.Zero;
             }
-            catch { _amdSubscription = IntPtr.Zero; }
-
-            // ── Primary: polling via AMDCreateDeviceList ───────────────────
-            _pollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-            _pollTimer.Tick += (_, _) => Poll();
-            _pollTimer.Start();
-            Poll(); // immediate first check
-        }
-
-        /// <summary>Force an immediate re-poll (tray menu Refresh).</summary>
-        public void Restart() => Poll();
-
-        // ── Polling ───────────────────────────────────────────────────────
-
-        private void Poll()
-        {
-            _pollCount++;
-            try
+            catch
             {
-                // Get UDIDs of all currently connected devices
-                var nowUdids = GetConnectedUdids(); // udid → device handle
-
-                // Detect newly connected devices
-                foreach (var (udid, handle) in nowUdids)
-                {
-                    // udid is our cheap identity key; serial is what we expose
-                    // Check by udid first — if we already know this device by any serial, skip
-                    bool alreadyTracked = _connected.Values.Any(
-                        d => string.Equals(d.UDID, udid, StringComparison.OrdinalIgnoreCase));
-
-                    if (!alreadyTracked)
-                    {
-                        DeviceInfo? di = ReadAllDeviceFields(handle);
-                        if (di != null && !string.IsNullOrEmpty(di.SerialNumber))
-                        {
-                            _connected[di.SerialNumber] = di;
-                            DeviceConnected?.Invoke(this, di);
-                        }
-                    }
-                }
-
-                // Detect disconnected devices
-                var nowUdidSet = new HashSet<string>(
-                    nowUdids.Keys, StringComparer.OrdinalIgnoreCase);
-
-                foreach (var serial in _connected.Keys.ToList())
-                {
-                    DeviceInfo info = _connected[serial];
-                    bool stillConnected = !string.IsNullOrEmpty(info.UDID)
-                        ? nowUdidSet.Contains(info.UDID)
-                        : nowUdids.Count > 0; // fallback if UDID wasn't read
-
-                    if (!stillConnected)
-                    {
-                        _connected.Remove(serial);
-                        DeviceDisconnected?.Invoke(this, serial);
-                    }
-                }
+                _amdSubscription = IntPtr.Zero;
             }
-            catch (Exception ex)
+
+            _amdReady.Set(); // unblock Start()
+
+            // Pump the Win32 message loop indefinitely.
+            // AMD posts callback invocations as thread messages; DispatchMessage
+            // causes the callback to run on this thread.
+            MSG msg;
+            while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
             {
-                _lastPollException = ex.Message;
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
             }
         }
 
-        /// <summary>
-        /// Calls AMDCreateDeviceList() and returns UDID → device handle for every
-        /// device the Apple Mobile Device Service currently knows about.
-        /// </summary>
-        private static Dictionary<string, IntPtr> GetConnectedUdids()
-        {
-            var result = new Dictionary<string, IntPtr>(StringComparer.OrdinalIgnoreCase);
-            IntPtr list = IntPtr.Zero;
-            try
-            {
-                list = AMD.AMDCreateDeviceList();
-                if (list == IntPtr.Zero) return result;
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
 
-                long count = CF.CFArrayGetCount(list);
-                for (long i = 0; i < count; i++)
-                {
-                    IntPtr device = CF.CFArrayGetValueAtIndex(list, i);
-                    if (device == IntPtr.Zero) continue;
-
-                    // AMDeviceCopyDeviceIdentifier is cheap — no connect/session needed
-                    IntPtr udidRef = AMD.AMDeviceCopyDeviceIdentifier(device);
-                    if (udidRef == IntPtr.Zero) continue;
-                    string? udid = CF.CFValueToString(udidRef);
-                    CF.CFRelease(udidRef);
-
-                    if (!string.IsNullOrEmpty(udid))
-                        result[udid] = device;
-                }
-            }
-            finally
-            {
-                if (list != IntPtr.Zero) CF.CFRelease(list);
-            }
-            return result;
-        }
-
-        // ── AMD notification callback (bonus path — may never fire on v1818) ──
+        // ── AMD notification callback (runs on AMD thread) ────────────────
 
         private void OnAmdNotification(ref AMD.DeviceCallbackInfo info, IntPtr cookie)
         {
             _callbackFireCount++;
-            // If the callback fires (iTunes-era DLL), trigger an immediate poll
-            // so the UI updates instantly rather than waiting up to 2 s.
-            Poll();
+            _lastCallbackMsg = info.Message;
+
+            IntPtr device = info.Device;
+            uint   msg    = info.Message;
+
+            if (msg == AMD.MSG_CONNECTED)
+            {
+                // Marshal to UI thread for field reading and event firing.
+                // Device handle is valid as long as the device stays connected.
+                _uiCtx!.Post(_ => HandleConnected(device), null);
+            }
+            else if (msg == AMD.MSG_DISCONNECTED)
+            {
+                _uiCtx!.Post(_ => HandleDisconnected(device), null);
+            }
+        }
+
+        // ── Connect / disconnect handlers (run on UI thread) ──────────────
+
+        private void HandleConnected(IntPtr device)
+        {
+            DeviceInfo? di = ReadAllDeviceFields(device);
+            if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
+
+            _handleToSerial[device] = di.SerialNumber;
+            _connected[di.SerialNumber] = di;
+            DeviceConnected?.Invoke(this, di);
+        }
+
+        private void HandleDisconnected(IntPtr device)
+        {
+            if (!_handleToSerial.TryGetValue(device, out string? serial)) return;
+
+            _handleToSerial.Remove(device);
+            _connected.Remove(serial);
+            DeviceDisconnected?.Invoke(this, serial);
         }
 
         // ── Device field reading ──────────────────────────────────────────
@@ -187,7 +206,7 @@ namespace iDeviceInfo
 
                 var info = new DeviceInfo();
 
-                // Basic fields — often available without a full lockdown session
+                // Basic fields — usually readable without a full lockdown session
                 info.DeviceName   = ReadKey(device, null, "DeviceName")     ?? "Unknown Device";
                 info.SerialNumber = ReadKey(device, null, "SerialNumber")   ?? "";
                 info.UDID         = ReadKey(device, null, "UniqueDeviceID") ?? "";
@@ -195,12 +214,12 @@ namespace iDeviceInfo
                 info.iOSVersion   = ReadKey(device, null, "ProductVersion") ?? "";
                 info.ModelName    = LookupModelName(info.ProductType);
 
-                // Privileged fields — require a paired lockdown session
+                // Privileged fields — need a paired lockdown session
                 bool sessionOk = AMD.AMDeviceValidatePairing(device) == 0 &&
                                  AMD.AMDeviceStartSession(device)    == 0;
                 if (sessionOk)
                 {
-                    // Retry basic fields that need a session on some devices/iOS versions
+                    // Retry basics that might need a session on some iOS versions
                     if (string.IsNullOrEmpty(info.SerialNumber))
                         info.SerialNumber = ReadKey(device, null, "SerialNumber") ?? "";
                     if (string.IsNullOrEmpty(info.UDID))
@@ -236,7 +255,6 @@ namespace iDeviceInfo
 
                 AMD.AMDeviceDisconnect(device);
 
-                // Need at least a serial or UDID to be a useful result
                 return (!string.IsNullOrEmpty(info.SerialNumber) ||
                         !string.IsNullOrEmpty(info.UDID)) ? info : null;
             }
@@ -416,70 +434,52 @@ namespace iDeviceInfo
 
         public void DumpWithAmdState()
         {
-            var nowUdids = new Dictionary<string, IntPtr>();
-            string listError = "(none)";
-            try { nowUdids = GetConnectedUdids(); }
-            catch (Exception ex) { listError = ex.Message; }
+            string lastMsgName = _lastCallbackMsg switch
+            {
+                AMD.MSG_CONNECTED    => "MSG_CONNECTED",
+                AMD.MSG_DISCONNECTED => "MSG_DISCONNECTED",
+                AMD.MSG_PAIRED       => "MSG_PAIRED",
+                0                    => "(none yet)",
+                _                    => $"unknown(0x{_lastCallbackMsg:X})"
+            };
 
             var lines = new List<string>
             {
                 $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
                 $"AMD subscription active:    {_amdSubscription != IntPtr.Zero}",
-                $"Notification callback fires: {_callbackFireCount} times",
-                $"Poll count:                 {_pollCount}",
-                $"Tracked connected devices:  {_connected.Count}",
-                $"AMDCreateDeviceList count:  {nowUdids.Count}",
-                $"Last poll exception:        {_lastPollException ?? "(none)"}",
+                $"AMD thread alive:           {_amdThread?.IsAlive}",
+                $"AMD thread ID:              {_amdThreadId}",
+                $"Callback fired count:       {_callbackFireCount}",
+                $"Last callback message:      {lastMsgName}",
                 $"Last read exception:        {_lastReadException ?? "(none)"}",
-                $"AMDCreateDeviceList error:  {listError}",
+                $"Tracked connected devices:  {_connected.Count}",
                 ""
             };
 
-            // Show what AMDCreateDeviceList currently returns
-            if (nowUdids.Count == 0)
+            if (_connected.Count == 0)
             {
-                lines.Add("AMDCreateDeviceList returned 0 devices.");
-                lines.Add("(Is a device plugged in and trusted on this PC?)");
+                lines.Add("No devices currently tracked.");
+                lines.Add("(If a device is plugged in, disconnect and reconnect it.)");
             }
             else
             {
-                lines.Add($"=== Live devices from AMDCreateDeviceList ({nowUdids.Count}) ===");
-                lines.Add("");
                 int i = 1;
-                foreach (var (udid, handle) in nowUdids)
+                foreach (var (serial, info) in _connected)
                 {
                     lines.Add($"── Device {i++} ───────────────────────────────────────────────");
-                    lines.Add($"   UDID (fast):   {udid}");
-                    DeviceInfo? di = ReadAllDeviceFields(handle);
-                    if (di != null)
-                    {
-                        lines.Add($"   DeviceName:    {di.DeviceName}");
-                        lines.Add($"   ModelName:     {di.ModelName}");
-                        lines.Add($"   ProductType:   {di.ProductType}");
-                        lines.Add($"   iOSVersion:    {di.iOSVersion}");
-                        lines.Add($"   SerialNumber:  {di.SerialNumber}");
-                        lines.Add($"   IMEI:          {di.IMEI}");
-                        lines.Add($"   BatteryLevel:  {di.BatteryLevel}");
-                        lines.Add($"   IsCharging:    {di.IsCharging}");
-                        lines.Add($"   UDID:          {di.UDID}");
-                    }
-                    else
-                    {
-                        lines.Add($"   ReadAllDeviceFields returned null");
-                        lines.Add($"   Last read exception: {_lastReadException ?? "(none)"}");
-                    }
+                    lines.Add($"   DeviceName:    {info.DeviceName}");
+                    lines.Add($"   ModelName:     {info.ModelName}");
+                    lines.Add($"   ProductType:   {info.ProductType}");
+                    lines.Add($"   iOSVersion:    {info.iOSVersion}");
+                    lines.Add($"   SerialNumber:  {info.SerialNumber}");
+                    lines.Add($"   IMEI:          {info.IMEI}");
+                    lines.Add($"   IMEI2:         {info.IMEI2}");
+                    lines.Add($"   BatteryLevel:  {info.BatteryLevel}");
+                    lines.Add($"   IsCharging:    {info.IsCharging}");
+                    lines.Add($"   UDID:          {info.UDID}");
                     lines.Add("");
                 }
             }
-
-            // Also show what the poll loop has currently tracked
-            lines.Add($"=== Tracked by poll loop ({_connected.Count}) ===");
-            lines.Add("");
-            foreach (var (serial, info) in _connected)
-            {
-                lines.Add($"   Serial: {serial}  Name: {info.DeviceName}  UDID: {info.UDID}");
-            }
-            if (_connected.Count == 0) lines.Add("   (none)");
 
             try
             {
@@ -504,12 +504,20 @@ namespace iDeviceInfo
         {
             if (_disposed) return;
             _disposed = true;
-            _pollTimer?.Stop();
-            _pollTimer?.Dispose();
+
+            // Unsubscribe AMD (still on the AMD thread conceptually, but safe to
+            // call from any thread at teardown)
             if (_amdSubscription != IntPtr.Zero)
             {
-                try { AMD.AMDeviceNotificationUnsubscribe(_amdSubscription); } catch { /* ignore */ }
+                try { AMD.AMDeviceNotificationUnsubscribe(_amdSubscription); } catch { }
                 _amdSubscription = IntPtr.Zero;
+            }
+
+            // Stop the AMD thread's message loop
+            if (_amdThreadId != 0)
+            {
+                try { PostThreadMessage(_amdThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero); }
+                catch { }
             }
         }
     }
