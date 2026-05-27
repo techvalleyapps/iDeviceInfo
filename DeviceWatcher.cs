@@ -40,13 +40,17 @@ namespace iDeviceInfo
         private bool   _scraping;
 
         // AMD notification state:
-        //   _amdAvailable = false  → MobileDevice.dll absent; pure LevelDB checkDate fallback.
+        //   _amdAvailable = false      → MobileDevice.dll absent; pure LevelDB checkDate fallback.
         //   _amdAvailable = true:
-        //     _amdSerial == null   → AMD says no device is physically connected.
-        //     _amdSerial == ""     → Device connected but serial unreadable; checkDate fallback.
-        //     _amdSerial == "XYZ"  → Device connected, serial known; filter blobs by serial.
+        //     _amdHadFirstEvent = false → Subscribed but no callback yet (device was already
+        //                                 plugged in before app started; retroactive MSG_CONNECTED
+        //                                 may not arrive). Fall through to checkDate heuristic.
+        //     _amdHadFirstEvent = true, _amdSerial == null  → AMD confirmed no device connected.
+        //     _amdHadFirstEvent = true, _amdSerial == ""    → Device connected, serial unreadable.
+        //     _amdHadFirstEvent = true, _amdSerial == "XYZ" → Device connected, serial known.
         private bool             _amdAvailable;
-        private volatile string? _amdSerial;       // written on UI thread, read on thread-pool
+        private volatile bool    _amdHadFirstEvent;  // set true on first MSG_CONNECTED or DISCONNECTED
+        private volatile string? _amdSerial;         // written on UI thread, read on thread-pool
         private IntPtr           _amdSubscription = IntPtr.Zero;
         private AMD.DeviceNotificationCallback? _amdCallback; // keep delegate alive; GC must not collect it
 
@@ -84,6 +88,8 @@ namespace iDeviceInfo
 
         private void OnAmdNotification(ref AMD.DeviceCallbackInfo info, IntPtr cookie)
         {
+            _amdHadFirstEvent = true; // we've heard from AMD at least once
+
             if (info.Message == AMD.MSG_CONNECTED)
             {
                 _amdSerial = ReadSerialFromDevice(info.Device) ?? "";
@@ -148,14 +154,15 @@ namespace iDeviceInfo
             _scraping = true;
 
             // Snapshot AMD state on the UI thread before jumping to the thread pool.
-            bool    amdAvailable = _amdAvailable;
-            string? amdSerial    = _amdSerial;
+            bool    amdAvailable     = _amdAvailable;
+            bool    amdHadFirstEvent = _amdHadFirstEvent;
+            string? amdSerial        = _amdSerial;
 
             DeviceInfo? info;
             try
             {
                 info = await System.Threading.Tasks.Task.Run(
-                    () => TryScrape3uTools(amdAvailable, amdSerial));
+                    () => TryScrape3uTools(amdAvailable, amdHadFirstEvent, amdSerial));
             }
             finally
             {
@@ -178,16 +185,19 @@ namespace iDeviceInfo
             }
         }
 
-        private static DeviceInfo? TryScrape3uTools(bool amdAvailable, string? amdSerial)
+        private static DeviceInfo? TryScrape3uTools(bool amdAvailable, bool amdHadFirstEvent, string? amdSerial)
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
             bool running = procs.Length > 0;
             foreach (var p in procs) p.Dispose();
             if (!running) return null;
 
-            // If AMD is available and definitively says no device is connected,
-            // don't let stale LevelDB data from a previous session report a ghost device.
-            if (amdAvailable && amdSerial == null) return null;
+            // Only trust "AMD null = no device connected" AFTER we've received at least
+            // one callback from AMD (MSG_CONNECTED or MSG_DISCONNECTED).  Before that,
+            // _amdSerial is null simply because the device was already plugged in when
+            // AMDeviceNotificationSubscribe was called and a retroactive MSG_CONNECTED
+            // hasn't arrived yet — fall through to the LevelDB heuristic in that case.
+            if (amdAvailable && amdHadFirstEvent && amdSerial == null) return null;
 
             List<string> texts = CollectFromLocalStorage();
             return ParseDeviceInfo(texts, amdSerial);
@@ -314,57 +324,95 @@ namespace iDeviceInfo
         /// </summary>
         private static DeviceInfo? ParseDeviceInfo(List<string> texts, string? knownSerial = null)
         {
-            if (!string.IsNullOrEmpty(knownSerial))
-            {
-                var blobsForSerial = texts
-                    .Where(t => t.Contains(knownSerial, StringComparison.Ordinal))
-                    .Select(t =>
-                    {
-                        var m  = ReCheckDate.Match(t);
-                        var dt = DateTime.MinValue;
-                        if (m.Success)
-                            DateTime.TryParseExact(
-                                m.Groups[1].Value, "MM/dd/yyyy HH:mm:ss",
-                                System.Globalization.CultureInfo.InvariantCulture,
-                                System.Globalization.DateTimeStyles.None, out dt);
-                        return (blob: t, date: dt);
-                    })
-                    .OrderByDescending(x => x.date)
-                    .Select(x => x.blob)
-                    .ToList();
+            // ── Blob structure in 3uTools LevelDB ────────────────────────
+            // Each scan produces a blob split across multiple extracted strings:
+            //
+            //   HEAD chunk  contains: checkDate, deviceName, imei, batLife
+            //               (unique per scan — checkDate changes each time)
+            //   CONT chunks contain: serial, productType, key_serial, ...
+            //               (IDENTICAL across all scans of the same device,
+            //                so deduplicated by CollectFromLocalStorage after
+            //                the first scan — only appear once in `texts`)
+            //
+            // Strategy: group chunks by HEAD → extract IMEI from the target HEAD
+            // → select ALL groups whose HEAD contains that IMEI (gives us every
+            // scan of this device) → flatten newest-first so the freshest HEAD
+            // fields (batLife etc.) win and the older complete group's CONT chunks
+            // supply the serial + productType that later HEADs lack (deduplicated).
 
-                if (blobsForSerial.Count > 0)
-                    return ExtractFields(blobsForSerial);
-
-                // 3uTools hasn't scanned this device yet — return null so the timer retries.
-                return null;
-            }
-
-            // AMD serial unavailable (dll missing or device locked/untrusted).
-            // Fall back to the original "latest checkDate" heuristic.
-            string?  latestBlob = null;
-            DateTime latestDate = DateTime.MinValue;
+            // ── Step 1: group consecutive chunks into logical blobs ───────
+            var groups = new List<(DateTime date, List<string> chunks)>();
+            List<string>? cur = null;
+            DateTime curDate  = DateTime.MinValue;
 
             foreach (string t in texts)
             {
                 var m = ReCheckDate.Match(t);
-                if (!m.Success) continue;
-
-                if (DateTime.TryParseExact(
+                if (m.Success && DateTime.TryParseExact(
                         m.Groups[1].Value, "MM/dd/yyyy HH:mm:ss",
                         System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.None,
-                        out DateTime dt)
-                    && dt > latestDate)
+                        System.Globalization.DateTimeStyles.None, out DateTime dt))
                 {
-                    latestDate = dt;
-                    latestBlob = t;
+                    if (cur != null) groups.Add((curDate, cur));
+                    cur     = new List<string> { t };
+                    curDate = dt;
+                }
+                else
+                {
+                    cur?.Add(t);
                 }
             }
+            if (cur != null) groups.Add((curDate, cur));
 
-            return ExtractFields(latestBlob != null
-                ? new List<string> { latestBlob }
-                : texts);
+            if (groups.Count == 0)
+                return ExtractFields(texts);
+
+            // ── Step 2: determine the target IMEI ────────────────────────
+            string? targetImei = null;
+
+            if (!string.IsNullOrEmpty(knownSerial))
+            {
+                // AMD gave us the serial.  Find the group whose CONT chunks contain it
+                // (CONT chunks are where serial lives; IMEI is in the same group's HEAD).
+                // If no group has it yet, 3uTools hasn't finished scanning — retry later.
+                foreach (var g in groups)
+                {
+                    if (g.chunks.Any(c => c.Contains(knownSerial, StringComparison.Ordinal)))
+                    {
+                        var m = ReImei.Match(g.chunks[0]); // IMEI is always in the HEAD
+                        if (m.Success) { targetImei = m.Groups[1].Value; break; }
+                    }
+                }
+
+                if (targetImei == null) return null; // not yet scanned — timer will retry
+            }
+            else
+            {
+                // No AMD serial — use the latest HEAD's IMEI as the target device.
+                var latest = groups.OrderByDescending(g => g.date).FirstOrDefault();
+                if (latest.chunks != null)
+                {
+                    var m = ReImei.Match(latest.chunks[0]);
+                    if (m.Success) targetImei = m.Groups[1].Value;
+                }
+
+                if (targetImei == null) return ExtractFields(texts); // no IMEI at all
+            }
+
+            // ── Step 3: collect all groups for this device, newest first ─
+            // Filter by IMEI in the HEAD chunk so we never cross device boundaries.
+            // This correctly includes the first-scan group (which has the deduped CONT
+            // chunks with serial/productType) as well as all later HEAD-only groups
+            // (which carry the freshest batLife and checkDate).
+            var selected = groups
+                .Where(g => g.chunks.Count > 0 &&
+                            g.chunks[0].Contains(targetImei!, StringComparison.Ordinal))
+                .OrderByDescending(g => g.date)
+                .ToList();
+
+            if (selected.Count == 0) return null;
+
+            return ExtractFields(selected.SelectMany(g => g.chunks).ToList());
         }
 
         private static DeviceInfo? ExtractFields(List<string> texts)
@@ -413,14 +461,14 @@ namespace iDeviceInfo
         // ── Debug dump ────────────────────────────────────────────────────
 
         /// <summary>Forwards the current AMD state into DumpToFile.</summary>
-        public void DumpWithAmdState() => DumpToFile(_amdAvailable, _amdSerial);
+        public void DumpWithAmdState() => DumpToFile(_amdAvailable, _amdHadFirstEvent, _amdSerial);
 
         /// <summary>
         /// Writes a debug file to the Desktop showing LevelDB strings, blob selection,
         /// and the parsed result.  Pass amdSerial as reported by AMDevice for an
         /// accurate picture; leave defaults to simulate the pre-fix checkDate path.
         /// </summary>
-        public static void DumpToFile(bool amdAvailable = false, string? amdSerial = null)
+        public static void DumpToFile(bool amdAvailable = false, bool amdHadFirstEvent = false, string? amdSerial = null)
         {
             Process[] procs = Process.GetProcessesByName("3uTools");
             bool running = procs.Length > 0;
@@ -429,9 +477,10 @@ namespace iDeviceInfo
             var lines = new List<string>
             {
                 $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                $"3uTools running: {running}",
-                $"AMD available:   {amdAvailable}",
-                $"AMD serial:      {amdSerial ?? "(none)"}",
+                $"3uTools running:        {running}",
+                $"AMD available:          {amdAvailable}",
+                $"AMD had first event:    {amdHadFirstEvent}",
+                $"AMD serial:             {amdSerial ?? "(none)"}",
                 ""
             };
 
