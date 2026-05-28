@@ -195,6 +195,13 @@ namespace iDeviceInfo
             IntPtr device = info.Device;
             uint   msg    = info.Message;
 
+            // Ignore WiFi-connected devices — USB only
+            try
+            {
+                if (AMD.AMDeviceGetInterfaceType(device) != AMD.INTERFACE_USB) return;
+            }
+            catch { /* if the call fails, allow through */ }
+
             if (msg == AMD.MSG_CONNECTED)
             {
                 // *** Read device info HERE, on the AMD thread, while the
@@ -276,6 +283,11 @@ namespace iDeviceInfo
                         "com.apple.mobile.battery", "BatteryCurrentCapacity");
                     if (!string.IsNullOrEmpty(batt))
                         info.BatteryLevel = batt + "%";
+
+                    string? health = ReadKey(device,
+                        "com.apple.mobile.battery", "BatteryMaximumCapacity");
+                    if (!string.IsNullOrEmpty(health))
+                        info.BatteryHealth = health + "%";
 
                     string? charging = ReadKey(device,
                         "com.apple.mobile.battery", "BatteryIsCharging");
