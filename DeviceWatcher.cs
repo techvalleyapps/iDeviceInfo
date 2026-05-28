@@ -284,8 +284,12 @@ namespace iDeviceInfo
                     if (!string.IsNullOrEmpty(batt))
                         info.BatteryLevel = batt + "%";
 
-                    string? health = ReadKey(device,
-                        "com.apple.mobile.battery", "BatteryMaximumCapacity");
+                    // Battery health key varies by iOS version — try them in order
+                    string? health =
+                        ReadKey(device, "com.apple.mobile.battery", "BatteryMaximumCapacity") ??
+                        ReadKey(device, "com.apple.mobile.battery", "MaximumCapacityPercent")  ??
+                        ReadKey(device, "com.apple.mobile.battery", "BatteryHealthPercent")    ??
+                        ReadKey(device, null,                        "BatteryMaximumCapacity");
                     if (!string.IsNullOrEmpty(health))
                         info.BatteryHealth = health + "%";
 
@@ -520,6 +524,7 @@ namespace iDeviceInfo
                     lines.Add($"   IMEI:          {info.IMEI}");
                     lines.Add($"   IMEI2:         {info.IMEI2}");
                     lines.Add($"   BatteryLevel:  {info.BatteryLevel}");
+                    lines.Add($"   BatteryHealth: {info.BatteryHealth}");
                     lines.Add($"   IsCharging:    {info.IsCharging}");
                     lines.Add($"   UDID:          {info.UDID}");
                     lines.Add("");
