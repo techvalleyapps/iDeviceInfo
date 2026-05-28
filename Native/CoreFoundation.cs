@@ -64,6 +64,25 @@ namespace iDeviceInfo.Native
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr CFArrayGetValueAtIndex(IntPtr array, long index);
 
+        // ── RunLoop ───────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns (and creates if necessary) the CF RunLoop for the calling thread.
+        /// AMD on Apple Devices app v1818+ delivers callbacks via CF RunLoop, so this
+        /// must be called before AMDeviceNotificationSubscribe to avoid a native abort().
+        /// Do NOT CFRelease the returned pointer (it is a borrowed reference).
+        /// </summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr CFRunLoopGetCurrent();
+
+        /// <summary>Runs the current thread's CF RunLoop until CFRunLoopStop is called.</summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void CFRunLoopRun();
+
+        /// <summary>Stops a running CF RunLoop, causing CFRunLoopRun to return.</summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void CFRunLoopStop(IntPtr runLoop);
+
         // ── Release ───────────────────────────────────────────────────────
 
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
