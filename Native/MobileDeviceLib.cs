@@ -89,6 +89,35 @@ namespace iDeviceInfo.Native
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern int AMDeviceDisconnect(IntPtr device);
 
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int AMDeviceStartService(
+            IntPtr device,
+            IntPtr serviceName,
+            out IntPtr serviceConnection,
+            IntPtr unknown);
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int AMDeviceSecureStartService(
+            IntPtr device,
+            IntPtr serviceName,
+            IntPtr options,
+            out IntPtr serviceConnection);
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UIntPtr AMDServiceConnectionSend(
+            IntPtr serviceConnection,
+            byte[] buffer,
+            UIntPtr length);
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UIntPtr AMDServiceConnectionReceive(
+            IntPtr serviceConnection,
+            byte[] buffer,
+            UIntPtr length);
+
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void AMDServiceConnectionInvalidate(IntPtr serviceConnection);
+
         // ── Value Reading ─────────────────────────────────────────────────
 
         /// <summary>
