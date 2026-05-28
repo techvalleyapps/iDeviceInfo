@@ -103,6 +103,20 @@ namespace iDeviceInfo.Native
             IntPtr domain,
             IntPtr key);
 
+        // ── Interface type ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the physical connection type for a device handle.
+        /// Does not require AMDeviceConnect.
+        ///   1 (INTERFACE_USB)  = wired USB
+        ///   2 (INTERFACE_WIFI) = WiFi / network
+        /// </summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int AMDeviceGetInterfaceType(IntPtr device);
+
+        public const int INTERFACE_USB  = 1;
+        public const int INTERFACE_WIFI = 2;
+
         // ── Misc ──────────────────────────────────────────────────────────
 
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
