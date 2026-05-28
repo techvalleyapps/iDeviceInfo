@@ -284,14 +284,21 @@ namespace iDeviceInfo
                     if (!string.IsNullOrEmpty(batt))
                         info.BatteryLevel = batt + "%";
 
-                    // Battery health key varies by iOS version — try them in order
-                    string? health =
-                        ReadKey(device, "com.apple.mobile.battery", "BatteryMaximumCapacity") ??
-                        ReadKey(device, "com.apple.mobile.battery", "MaximumCapacityPercent")  ??
-                        ReadKey(device, "com.apple.mobile.battery", "BatteryHealthPercent")    ??
-                        ReadKey(device, null,                        "BatteryMaximumCapacity");
+                    // Battery health varies by iOS version; try diagnostics first.
+                    string? health = DiagnosticsRelayClient.ReadBatteryHealth(device);
+                    if (string.IsNullOrEmpty(health))
+                    {
+                        string? lockdownHealth =
+                            ReadKey(device, "com.apple.mobile.battery", "BatteryMaximumCapacity") ??
+                            ReadKey(device, "com.apple.mobile.battery", "MaximumCapacityPercent")  ??
+                            ReadKey(device, "com.apple.mobile.battery", "BatteryHealthPercent")    ??
+                            ReadKey(device, null,                        "BatteryMaximumCapacity");
+
+                        if (!string.IsNullOrEmpty(lockdownHealth))
+                            health = lockdownHealth + "%";
+                    }
                     if (!string.IsNullOrEmpty(health))
-                        info.BatteryHealth = health + "%";
+                        info.BatteryHealth = health;
 
                     string? charging = ReadKey(device,
                         "com.apple.mobile.battery", "BatteryIsCharging");
