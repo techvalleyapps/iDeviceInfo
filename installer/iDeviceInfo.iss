@@ -47,15 +47,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\publish\win-x64\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; Desktop shortcut — "Run as administrator" flag so device pairing works
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Flags: runasadmin
+; Desktop shortcut
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
-; Start Menu shortcut — also runs as administrator
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Flags: runasadmin
-
-; Uninstall entry in Start Menu
+; Start Menu shortcuts
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 ; Launch the app after install (also as admin, via the shortcut flag)
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent shellexec runasadmin
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent shellexec
