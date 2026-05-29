@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Xml.Linq;
 using iDeviceInfo.Native;
@@ -10,12 +11,17 @@ namespace iDeviceInfo
     {
         private const string DiagnosticsRelayService = "com.apple.mobile.diagnostics_relay";
 
+        // Distinguishes a secure AMDServiceConnectionRef from a raw SOCKET handle
+        // so we know which cleanup path to take.
+        private enum ConnectionKind { Secure, LegacySocket }
+
         public static string? ReadBatteryHealth(IntPtr device)
         {
             IntPtr connection;
+            ConnectionKind kind;
             try
             {
-                connection = StartDiagnosticsRelay(device);
+                (connection, kind) = StartDiagnosticsRelay(device);
             }
             catch
             {
@@ -26,6 +32,10 @@ namespace iDeviceInfo
 
             try
             {
+                // Legacy plain-socket connections don't support
+                // AMDServiceConnectionSend/Receive — nothing we can do.
+                if (kind == ConnectionKind.LegacySocket) return null;
+
                 foreach ((string key, bool isClass) in new[]
                 {
                     ("AppleSmartBattery", false),
@@ -48,13 +58,21 @@ namespace iDeviceInfo
             }
             finally
             {
-                try { AMD.AMDServiceConnectionInvalidate(connection); } catch { }
+                try
+                {
+                    if (kind == ConnectionKind.Secure)
+                        AMD.AMDServiceConnectionInvalidate(connection);
+                    else
+                        // Raw SOCKET — close it the Win32 way
+                        new Socket(new System.Net.Sockets.SafeSocketHandle(connection, false)).Close();
+                }
+                catch { }
             }
 
             return null;
         }
 
-        private static IntPtr StartDiagnosticsRelay(IntPtr device)
+        private static (IntPtr conn, ConnectionKind kind) StartDiagnosticsRelay(IntPtr device)
         {
             IntPtr serviceName = CF.ToCFString(DiagnosticsRelayService);
             try
@@ -64,7 +82,7 @@ namespace iDeviceInfo
                     int secure = AMD.AMDeviceSecureStartService(
                         device, serviceName, IntPtr.Zero, out IntPtr secureConnection);
                     if (secure == 0 && secureConnection != IntPtr.Zero)
-                        return secureConnection;
+                        return (secureConnection, ConnectionKind.Secure);
                 }
                 catch (EntryPointNotFoundException)
                 {
@@ -75,11 +93,13 @@ namespace iDeviceInfo
                 {
                     int legacy = AMD.AMDeviceStartService(
                         device, serviceName, out IntPtr legacyConnection, IntPtr.Zero);
-                    return legacy == 0 ? legacyConnection : IntPtr.Zero;
+                    return legacy == 0
+                        ? (legacyConnection, ConnectionKind.LegacySocket)
+                        : (IntPtr.Zero, ConnectionKind.Secure);
                 }
                 catch
                 {
-                    return IntPtr.Zero;
+                    return (IntPtr.Zero, ConnectionKind.Secure);
                 }
             }
             finally
