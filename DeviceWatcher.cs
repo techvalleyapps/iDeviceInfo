@@ -202,21 +202,66 @@ namespace iDeviceInfo
             }
             catch { /* if the call fails, allow through */ }
 
-            if (msg == AMD.MSG_CONNECTED || msg == AMD.MSG_PAIRED)
+            if (msg == AMD.MSG_CONNECTED)
             {
-                // MSG_CONNECTED  — device just plugged in (may be untrusted; session fields
-                //                  will be empty if pairing is not yet granted).
-                // MSG_PAIRED     — user just tapped "Trust" on the device; re-read everything
-                //                  now that a full lockdown session is possible.
+                // ── Trust check ───────────────────────────────────────────────
+                // Check pairing status while still on the AMD thread (fast, no
+                // blocking).  If the device is not yet trusted we start a
+                // dedicated pairing thread and wait for MSG_PAIRED.
                 //
-                // *** Read device info HERE, on the AMD thread, while the
-                // device handle is guaranteed valid.  Never post a raw IntPtr
-                // to the UI thread — it may be invalid by the time it runs. ***
-                bool paired = msg == AMD.MSG_PAIRED;
-                DeviceInfo? di = ReadAllDeviceFields(device, isPaired: paired);
+                // IMPORTANT: AMDevicePair() is a BLOCKING call — it sends the
+                // pairing request and then waits for the user to tap Trust on
+                // the device (can take 10-30 s).  Calling it from inside the
+                // CF RunLoop callback deadlocks the RunLoop, so we offload it.
+
+                bool trusted = false;
+                try
+                {
+                    AMD.AMDeviceConnect(device);
+                    trusted = AMD.AMDeviceValidatePairing(device) == 0;
+                    AMD.AMDeviceDisconnect(device);
+                }
+                catch { try { AMD.AMDeviceDisconnect(device); } catch { } }
+
+                if (!trusted)
+                {
+                    // Kick off pairing on its own thread so the CF RunLoop stays free.
+                    // Once the user taps Trust the cert is written to disk and
+                    // MobileDevice.dll fires MSG_PAIRED — we handle that below.
+                    var devHandle = device;
+                    new Thread(() =>
+                    {
+                        try
+                        {
+                            AMD.AMDeviceConnect(devHandle);
+                            AMD.AMDevicePair(devHandle);      // blocks until Trust or timeout
+                            AMD.AMDeviceDisconnect(devHandle);
+                        }
+                        catch { try { AMD.AMDeviceDisconnect(devHandle); } catch { } }
+                    })
+                    { IsBackground = true, Name = "iDeviceInfo-Pair" }.Start();
+
+                    return; // wait for MSG_PAIRED before reading device info
+                }
+
+                // Already trusted — read everything right now.
+                DeviceInfo? di = ReadAllDeviceFields(device);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
-                // Marshal the plain C# result to the UI thread
+                _uiCtx!.Post(_ =>
+                {
+                    _handleToSerial[device]     = di.SerialNumber;
+                    _connected[di.SerialNumber] = di;
+                    DeviceConnected?.Invoke(this, di);
+                }, null);
+            }
+            else if (msg == AMD.MSG_PAIRED)
+            {
+                // User tapped Trust — pairing cert is now on disk.
+                // Re-read with a clean connection so we get the full session fields.
+                DeviceInfo? di = ReadAllDeviceFields(device, isPaired: true);
+                if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
+
                 _uiCtx!.Post(_ =>
                 {
                     _handleToSerial[device]     = di.SerialNumber;
@@ -264,30 +309,9 @@ namespace iDeviceInfo
                 info.iOSVersion   = ReadKey(device, null, "ProductVersion") ?? "";
                 info.ModelName    = LookupModelName(info.ProductType);
 
-                // ── Pairing handshake ─────────────────────────────────────
-                //
-                // AMDeviceValidatePairing checks whether a pairing record already
-                // exists on disk.  If it doesn't (new/untrusted device), we call
-                // AMDevicePair() which:
-                //   • On first plug-in  → sends the pairing request that triggers
-                //                         "Trust This Computer?" on the device.
-                //   • On MSG_PAIRED     → completes the TLS handshake and writes the
-                //                         signed pairing certificate to disk so the
-                //                         device stays trusted across future plug-ins.
-                //
-                // Without calling AMDevicePair() the record is never persisted and
-                // iOS asks for Trust again every time.
-
-                bool alreadyPaired = AMD.AMDeviceValidatePairing(device) == 0;
-                if (!alreadyPaired)
-                {
-                    try { AMD.AMDevicePair(device); } catch { }
-                    // Re-check — if MSG_PAIRED just fired, the pair should now succeed.
-                    alreadyPaired = AMD.AMDeviceValidatePairing(device) == 0;
-                }
-
                 // Privileged fields — need a valid pairing + open lockdown session
-                bool sessionOk = alreadyPaired && AMD.AMDeviceStartSession(device) == 0;
+                bool sessionOk = AMD.AMDeviceValidatePairing(device) == 0 &&
+                                 AMD.AMDeviceStartSession(device)    == 0;
                 if (sessionOk)
                 {
                     // Retry basics — some fields only come back after a session opens
