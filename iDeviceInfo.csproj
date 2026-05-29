@@ -12,6 +12,9 @@
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
 
+    <!-- Require admin so AMDevicePair() can write to C:\ProgramData\Apple\Lockdown\ -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+
     <!-- Single-file self-contained exe for distribution -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
@@ -26,6 +29,5 @@
     <Description>iOS device info reader - reads Serial, IMEI, Battery Health from connected devices</Description>
     <Copyright>2025</Copyright>
   </PropertyGroup>
-
 
 </Project>
