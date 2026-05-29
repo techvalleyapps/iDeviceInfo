@@ -47,14 +47,6 @@ namespace iDeviceInfo
         /// <summary>True if the device is currently charging.</summary>
         public bool   IsCharging    { get; set; }
 
-        // ── Diagnostics ───────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Number of crash report files in the device's CrashReporter directory.
-        /// -1 means the service could not be reached (device not trusted, etc.).
-        /// </summary>
-        public int CrashReportCount { get; set; } = -1;
-
         // ── Helpers ───────────────────────────────────────────────────────
 
         /// <summary>
@@ -69,7 +61,6 @@ namespace iDeviceInfo
             (string.IsNullOrEmpty(IMEI2) ? "" : $"IMEI 2:         {IMEI2}\n") +
             $"Battery Level:  {BatteryLevel}{(IsCharging ? " (Charging)" : "")}\n" +
             $"Battery Health: {BatteryHealth}\n" +
-            (CrashReportCount >= 0 ? $"Crash Reports:  {CrashReportCount}\n" : "") +
             $"UDID:           {UDID}";
     }
 }
