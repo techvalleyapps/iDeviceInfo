@@ -52,7 +52,7 @@ namespace iDeviceInfo.Forms
             var rows = new (string Label, string Value)[]
             {
                 ("Device Name",    _info.DeviceName),
-                ("Model",          string.IsNullOrEmpty(_info.ModelName) ? _info.ProductType : _info.ModelName),
+                ("Model",          _info.FullModelName),
                 ("iOS Build",      _info.iOSVersion),
                 ("Serial Number",  _info.SerialNumber),
                 ("IMEI",           _info.IMEI),
@@ -148,7 +148,7 @@ namespace iDeviceInfo.Forms
 
             var subLbl = new Label
             {
-                Text      = string.IsNullOrEmpty(_info.ModelName) ? _info.ProductType : _info.ModelName,
+                Text      = _info.FullModelName,
                 Font      = SubFont,
                 ForeColor = LabelColor,
                 Location  = new Point(PaddingX + 40, 28),
