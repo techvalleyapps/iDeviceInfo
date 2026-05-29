@@ -58,6 +58,7 @@ namespace iDeviceInfo.Forms
                 ("IMEI",           _info.IMEI),
                 ("Battery Level",  _info.BatteryLevel + (_info.IsCharging ? "  (Charging)" : "")),
                 ("Battery Health", _info.BatteryHealth),
+                ("Crash Reports",  _info.CrashReportCount < 0 ? "N/A" : _info.CrashReportCount.ToString()),
             };
 
             // Add IMEI2 row only when present
