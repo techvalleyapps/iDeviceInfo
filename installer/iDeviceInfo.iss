@@ -1,12 +1,5 @@
 ; ──────────────────────────────────────────────────────────────────────────────
 ; iDeviceInfo — Inno Setup installer script
-; Builds iDeviceInfoSetup.exe from the published single-file exe.
-;
-; Usage (local):
-;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\iDeviceInfo.iss
-;
-; Usage (CI — GitHub Actions):
-;   ISCC.exe installer\iDeviceInfo.iss /DMyAppVersion=1.0.0
 ; ──────────────────────────────────────────────────────────────────────────────
 
 #ifndef MyAppVersion
@@ -36,7 +29,6 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 VersionInfoVersion={#MyAppVersion}
@@ -51,18 +43,19 @@ CloseApplicationsFilter=*{#MyAppExeName}
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-Name: "autostart"; Description: "Start {#MyAppName} automatically when Windows starts"; GroupDescription: "Startup options:"
-
 [Files]
 Source: "..\publish\win-x64\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; Desktop shortcut — "Run as administrator" flag so device pairing works
+Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Flags: runasadmin
+
+; Start Menu shortcut — also runs as administrator
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Flags: runasadmin
+
+; Uninstall entry in Start Menu
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
-[Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
-
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent
+; Launch the app after install (also as admin, via the shortcut flag)
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall skipifsilent shellexec runasadmin
