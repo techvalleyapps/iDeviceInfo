@@ -47,14 +47,43 @@ namespace iDeviceInfo
         /// <summary>True if the device is currently charging.</summary>
         public bool   IsCharging    { get; set; }
 
+        // ── Storage & Color ───────────────────────────────────────────────
+
+        /// <summary>
+        /// Storage capacity rounded to nearest standard size (e.g. 128).
+        /// 0 means not available.
+        /// </summary>
+        public int    StorageGB     { get; set; } = 0;
+
+        /// <summary>
+        /// Human-readable color name derived from DeviceColor hex (e.g. "Midnight").
+        /// Empty string if not available.
+        /// </summary>
+        public string Color         { get; set; } = "";
+
         // ── Helpers ───────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Full model string in 3uTools style: "iPhone 12 Pro Max Silver 128GB".
+        /// Falls back gracefully when color / storage are not available.
+        /// </summary>
+        public string FullModelName
+        {
+            get
+            {
+                string model = string.IsNullOrEmpty(ModelName) ? ProductType : ModelName;
+                if (!string.IsNullOrEmpty(Color))   model += " " + Color;
+                if (StorageGB > 0)                  model += " " + (StorageGB >= 1024 ? "1TB" : StorageGB + "GB");
+                return model;
+            }
+        }
 
         /// <summary>
         /// Formats all key fields into a single clipboard-friendly string.
         /// </summary>
         public string ToClipboardText() =>
             $"Device Name:    {DeviceName}\n" +
-            $"Model:          {(string.IsNullOrEmpty(ModelName) ? ProductType : ModelName)}\n" +
+            $"Model:          {FullModelName}\n" +
             $"iOS Build:      {iOSVersion}\n" +
             $"Serial Number:  {SerialNumber}\n" +
             $"IMEI:           {IMEI}\n" +
