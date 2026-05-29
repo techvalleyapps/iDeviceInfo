@@ -246,15 +246,12 @@ namespace iDeviceInfo
         {
             try
             {
-                // On MSG_PAIRED the device may already be in "connected" state from the
-                // earlier MSG_CONNECTED attempt.  Disconnect first so we get a clean
-                // AMDeviceConnect, otherwise it returns a non-zero "already connected"
-                // error and we would bail out before reading any fields.
+                // On MSG_PAIRED the device may still be in "connected" state from the
+                // earlier MSG_CONNECTED attempt.  Disconnect first for a clean slate.
                 if (isPaired)
                     try { AMD.AMDeviceDisconnect(device); } catch { }
 
-                // Connect — some non-zero codes are non-fatal (e.g. already connected),
-                // so we try to proceed rather than aborting on any error.
+                // Connect — non-zero return is non-fatal on some DLL versions.
                 AMD.AMDeviceConnect(device);
 
                 var info = new DeviceInfo();
@@ -267,9 +264,30 @@ namespace iDeviceInfo
                 info.iOSVersion   = ReadKey(device, null, "ProductVersion") ?? "";
                 info.ModelName    = LookupModelName(info.ProductType);
 
-                // Privileged fields — need a paired, trusted lockdown session
-                bool sessionOk = AMD.AMDeviceValidatePairing(device) == 0 &&
-                                 AMD.AMDeviceStartSession(device)    == 0;
+                // ── Pairing handshake ─────────────────────────────────────
+                //
+                // AMDeviceValidatePairing checks whether a pairing record already
+                // exists on disk.  If it doesn't (new/untrusted device), we call
+                // AMDevicePair() which:
+                //   • On first plug-in  → sends the pairing request that triggers
+                //                         "Trust This Computer?" on the device.
+                //   • On MSG_PAIRED     → completes the TLS handshake and writes the
+                //                         signed pairing certificate to disk so the
+                //                         device stays trusted across future plug-ins.
+                //
+                // Without calling AMDevicePair() the record is never persisted and
+                // iOS asks for Trust again every time.
+
+                bool alreadyPaired = AMD.AMDeviceValidatePairing(device) == 0;
+                if (!alreadyPaired)
+                {
+                    try { AMD.AMDevicePair(device); } catch { }
+                    // Re-check — if MSG_PAIRED just fired, the pair should now succeed.
+                    alreadyPaired = AMD.AMDeviceValidatePairing(device) == 0;
+                }
+
+                // Privileged fields — need a valid pairing + open lockdown session
+                bool sessionOk = alreadyPaired && AMD.AMDeviceStartSession(device) == 0;
                 if (sessionOk)
                 {
                     // Retry basics — some fields only come back after a session opens
