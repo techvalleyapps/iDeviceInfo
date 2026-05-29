@@ -320,6 +320,8 @@ namespace iDeviceInfo
             }
         }
 
+        // ── Key reading ───────────────────────────────────────────────────
+
         private static string? ReadKey(IntPtr device, string? domain, string key)
         {
             IntPtr domainRef = domain != null ? CF.ToCFString(domain) : IntPtr.Zero;
