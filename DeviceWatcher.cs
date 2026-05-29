@@ -304,9 +304,6 @@ namespace iDeviceInfo
                         "com.apple.mobile.battery", "BatteryIsCharging");
                     info.IsCharging = charging == "true" || charging == "1";
 
-                    // Crash report count (uses a separate AFC service connection)
-                    info.CrashReportCount = CrashReportClient.GetCrashReportCount(device);
-
                     AMD.AMDeviceStopSession(device);
                 }
 
@@ -505,7 +502,6 @@ namespace iDeviceInfo
             var lines = new List<string>
             {
                 $"iDeviceInfo Debug Dump — {DateTime.Now:yyyy-MM-dd HH:mm:ss}",
-                $"Crash count (lifetime):     {Program.CrashCount}",
                 $"AMD subscription active:    {_amdSubscription != IntPtr.Zero}",
                 $"AMD thread alive:           {_amdThread?.IsAlive}",
                 $"AMD thread ID:              {_amdThreadId}",
@@ -539,7 +535,6 @@ namespace iDeviceInfo
                     lines.Add($"   BatteryLevel:  {info.BatteryLevel}");
                     lines.Add($"   BatteryHealth: {info.BatteryHealth}");
                     lines.Add($"   IsCharging:    {info.IsCharging}");
-                    lines.Add($"   CrashReports:  {(info.CrashReportCount < 0 ? "N/A" : info.CrashReportCount.ToString())}");
                     lines.Add($"   UDID:          {info.UDID}");
                     lines.Add("");
                 }
