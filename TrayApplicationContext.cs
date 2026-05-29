@@ -9,33 +9,31 @@ using iDeviceInfo.Forms;
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Main application context. Manages the system tray icon, device watcher,
-    /// and the popup DeviceInfoForm. Supports multiple simultaneously-connected devices.
+    /// Main application context. Manages the main window, system tray icon,
+    /// device watcher, and the popup DeviceInfoForm.
+    /// Supports multiple simultaneously-connected devices.
     /// </summary>
     public sealed class TrayApplicationContext : ApplicationContext
     {
         // ── Core objects ──────────────────────────────────────────────────
 
+        private readonly MainForm           _mainForm;
         private readonly NotifyIcon         _tray;
         private readonly DeviceWatcher      _watcher;
         private readonly FloatingCopyButton _floatingBtn;
 
         // ── Per-device tracking ───────────────────────────────────────────
 
-        // serial → DeviceInfo for all currently-connected devices
         private readonly Dictionary<string, DeviceInfo>        _devices   = new(StringComparer.OrdinalIgnoreCase);
-        // serial → tray menu item so we can remove it cleanly on disconnect
         private readonly Dictionary<string, ToolStripMenuItem> _menuItems = new(StringComparer.OrdinalIgnoreCase);
 
-        // Most-recently connected device — used for left-click tray action
-        private string? _lastSerial;
-        // The currently open popup and which device serial it is showing
+        private string?         _lastSerial;
         private DeviceInfoForm? _popup;
         private string?         _popupSerial;
 
         // ── Menu structural items ─────────────────────────────────────────
 
-        private readonly ToolStripSeparator _deviceSeparator; // device items go above this
+        private readonly ToolStripSeparator _deviceSeparator;
         private readonly ToolStripMenuItem  _refreshItem;
         private readonly ToolStripMenuItem  _debugItem;
 
@@ -43,6 +41,13 @@ namespace iDeviceInfo
 
         public TrayApplicationContext()
         {
+            // ── Main window ────────────────────────────────────────────────
+            // Shown on launch so the app is visible in the taskbar and can be
+            // pinned.  Closing the window hides it to the tray rather than
+            // exiting.
+            _mainForm = new MainForm();
+            _mainForm.Show();
+
             // ── Floating Copy All button ───────────────────────────────────
             _floatingBtn = new FloatingCopyButton();
 
@@ -54,40 +59,43 @@ namespace iDeviceInfo
                 Visible = true
             };
 
-            // ── Context menu layout ────────────────────────────────────────
-            //
-            //   [📱 Device Name]       ← inserted dynamically above separator
-            //   [📱 Device Name 2]     ← inserted dynamically above separator
-            //   ──────────────────
-            //   Refresh Devices
-            //   Debug: Dump Info
-            //   ──────────────────
-            //   Exit
-
+            // ── Context menu ──────────────────────────────────────────────
             var menu = new ContextMenuStrip();
 
             _deviceSeparator = new ToolStripSeparator();
             _refreshItem     = new ToolStripMenuItem("Refresh Devices");
             _debugItem       = new ToolStripMenuItem("Debug: Dump Device Info");
+            var showItem     = new ToolStripMenuItem("Show Window");
             var exitItem     = new ToolStripMenuItem("Exit");
 
             _refreshItem.Click += (_, _) => _watcher.Restart();
             _debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
-            exitItem.Click     += (_, _) => { _tray.Visible = false; Application.Exit(); };
+            showItem.Click     += (_, _) => _mainForm.ShowFromTray();
+            exitItem.Click     += (_, _) =>
+            {
+                _tray.Visible = false;
+                Application.Exit();
+            };
 
             menu.Items.Add(_deviceSeparator);
             menu.Items.Add(_refreshItem);
             menu.Items.Add(_debugItem);
             menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(showItem);
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
 
             _tray.ContextMenuStrip = menu;
 
-            // Left-click → show popup for most-recently connected device
+            // Left-click tray: show main window if no device, else show device popup
             _tray.MouseClick += (_, e) =>
             {
-                if (e.Button == MouseButtons.Left && _lastSerial != null)
+                if (e.Button != MouseButtons.Left) return;
+
+                if (_lastSerial != null)
                     ShowPopup(_lastSerial);
+                else
+                    _mainForm.ShowFromTray();
             };
 
             // ── Device watcher ─────────────────────────────────────────────
@@ -106,6 +114,7 @@ namespace iDeviceInfo
                 else
                     UpdateDeviceMenuItem(serial, info.DeviceName);
 
+                _mainForm.UpdateStatus(_devices.Count, info.DeviceName);
                 _floatingBtn.UpdateDevice(info);
                 UpdateTrayState();
 
@@ -116,7 +125,6 @@ namespace iDeviceInfo
                 }
                 else if (_popupSerial == serial)
                 {
-                    // Refresh triggered — reopen popup with fresh data
                     ShowPopup(serial);
                 }
             };
@@ -128,7 +136,6 @@ namespace iDeviceInfo
                 _devices.Remove(serial);
                 RemoveDeviceMenuItem(serial);
 
-                // Close the popup if it was showing this specific device
                 if (_popupSerial == serial)
                 {
                     _popup?.Close();
@@ -136,10 +143,11 @@ namespace iDeviceInfo
                     _popupSerial = null;
                 }
 
-                // Pick another connected device as the "last" one, or clear
                 if (_lastSerial == serial)
                     _lastSerial = _devices.Count > 0 ? _devices.Keys.First() : null;
 
+                _mainForm.UpdateStatus(_devices.Count,
+                    _lastSerial != null ? _devices[_lastSerial].DeviceName : null);
                 _floatingBtn.UpdateDevice(
                     _lastSerial != null ? _devices[_lastSerial] : null);
 
@@ -148,7 +156,6 @@ namespace iDeviceInfo
             };
 
             // Delay Start() until AFTER Application.Run() starts the message pump.
-            // AMDeviceNotificationSubscribe needs the pump live to deliver callbacks.
             EventHandler? onIdle = null;
             onIdle = (_, _) =>
             {
@@ -156,12 +163,6 @@ namespace iDeviceInfo
                 _watcher.Start();
             };
             Application.Idle += onIdle;
-
-            // Startup balloon
-            _tray.BalloonTipTitle = "iDeviceInfo";
-            _tray.BalloonTipText  = "Running in the system tray. Connect an iOS device to begin.";
-            _tray.BalloonTipIcon  = ToolTipIcon.Info;
-            _tray.ShowBalloonTip(3000);
         }
 
         // ── Dynamic device menu items ─────────────────────────────────────
@@ -175,7 +176,6 @@ namespace iDeviceInfo
             item.Click += (_, _) => ShowPopup(serial);
             _menuItems[serial] = item;
 
-            // Insert above the structural separator so device items stay at top
             int idx = _tray.ContextMenuStrip!.Items.IndexOf(_deviceSeparator);
             _tray.ContextMenuStrip.Items.Insert(idx, item);
         }
@@ -218,8 +218,7 @@ namespace iDeviceInfo
         private void UpdateTrayState()
         {
             bool connected = _devices.Count > 0;
-
-            var oldIcon = _tray.Icon;
+            var  oldIcon   = _tray.Icon;
             _tray.Icon = BuildTrayIcon(connected);
             oldIcon?.Dispose();
 
@@ -244,8 +243,8 @@ namespace iDeviceInfo
             g.Clear(Color.Transparent);
 
             var bodyColor = connected
-                ? Color.FromArgb(10, 132, 255)   // iOS blue when connected
-                : Color.FromArgb(130, 130, 130);  // grey when idle
+                ? Color.FromArgb(10, 132, 255)
+                : Color.FromArgb(130, 130, 130);
 
             using var bodyBrush = new SolidBrush(bodyColor);
             float x = 3, y = 1, w = 10, h = 14, r = 2.5f;
@@ -298,6 +297,7 @@ namespace iDeviceInfo
             {
                 _watcher.Dispose();
                 _popup?.Dispose();
+                _mainForm.Dispose();
                 _floatingBtn.Dispose();
                 _tray.Visible = false;
                 _tray.Dispose();
