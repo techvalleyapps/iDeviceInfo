@@ -166,12 +166,6 @@ namespace iDeviceInfo.Forms
                 Size      = new Size(W - 34, 30),
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            // Dim the footer if not elevated
-            if (!IsRunningAsAdmin())
-            {
-                footerLbl.Text      = "⚠  Not running as administrator  —  new device pairing may not work";
-                footerLbl.ForeColor = Color.FromArgb(255, 180, 0);
-            }
             inner.Controls.Add(footerLbl);
 
             // ── Drag to move ──────────────────────────────────────────────
@@ -226,17 +220,6 @@ namespace iDeviceInfo.Forms
             Show();
             WindowState = FormWindowState.Normal;
             Activate();
-        }
-
-        private static bool IsRunningAsAdmin()
-        {
-            try
-            {
-                using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
-                var principal = new System.Security.Principal.WindowsPrincipal(id);
-                return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-            }
-            catch { return false; }
         }
 
         private void MakeDraggable(Control ctrl)
