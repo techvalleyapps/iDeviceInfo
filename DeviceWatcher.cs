@@ -202,8 +202,13 @@ namespace iDeviceInfo
             }
             catch { /* if the call fails, allow through */ }
 
-            if (msg == AMD.MSG_CONNECTED)
+            if (msg == AMD.MSG_CONNECTED || msg == AMD.MSG_PAIRED)
             {
+                // MSG_CONNECTED  — device just plugged in (may be untrusted; session fields
+                //                  will be empty if pairing is not yet granted).
+                // MSG_PAIRED     — user just tapped "Trust" on the device; re-read everything
+                //                  now that a full lockdown session is possible.
+                //
                 // *** Read device info HERE, on the AMD thread, while the
                 // device handle is guaranteed valid.  Never post a raw IntPtr
                 // to the UI thread — it may be invalid by the time it runs. ***
@@ -304,6 +309,18 @@ namespace iDeviceInfo
                         "com.apple.mobile.battery", "BatteryIsCharging");
                     info.IsCharging = charging == "true" || charging == "1";
 
+                    // Storage — read raw byte count and snap to nearest standard size
+                    string? diskBytes = ReadKey(device, "com.apple.disk_usage", "TotalDiskCapacity")
+                                     ?? ReadKey(device, null, "TotalDiskCapacity");
+                    if (long.TryParse(diskBytes, out long rawBytes) && rawBytes > 0)
+                        info.StorageGB = NormalizeStorageGB(rawBytes);
+
+                    // Color — DeviceColor is a hex string like "#1b1b1b"
+                    string? colorHex = ReadKey(device, null, "DeviceColor")
+                                    ?? ReadKey(device, null, "DeviceEnclosureColor");
+                    if (!string.IsNullOrEmpty(colorHex))
+                        info.Color = HexToColorName(info.ProductType, colorHex);
+
                     AMD.AMDeviceStopSession(device);
                 }
 
@@ -334,6 +351,183 @@ namespace iDeviceInfo
             CF.CFRelease(valRef);
             return result;
         }
+
+        // ── Storage normalization ─────────────────────────────────────────
+
+        private static int NormalizeStorageGB(long bytes)
+        {
+            // Apple uses marketing gigabytes (1 GB = 1,000,000,000 bytes)
+            double gb = bytes / 1_000_000_000.0;
+            int[] sizes = { 4, 8, 16, 32, 64, 128, 256, 512, 1024 };
+            int best = sizes[0];
+            double minDiff = double.MaxValue;
+            foreach (int s in sizes)
+            {
+                double diff = Math.Abs(gb - s);
+                if (diff < minDiff) { minDiff = diff; best = s; }
+            }
+            return best;
+        }
+
+        // ── Color name lookup ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Maps a DeviceColor hex string (e.g. "#1b1b1b") to a human-readable
+        /// color name.  Uses an exact lookup table first; falls back to an HSL
+        /// heuristic for unknown codes.  Adjusts some names by device generation
+        /// (e.g. Silver→Starlight on iPhone 13+, Space Gray→Midnight on iPhone 13+).
+        /// </summary>
+        private static string HexToColorName(string productType, string hex)
+        {
+            hex = hex.Trim().ToUpperInvariant();
+            if (!hex.StartsWith("#")) hex = "#" + hex;
+
+            // ── Exact lookup table ────────────────────────────────────────
+            // Values sourced from Apple lockdown observations across device generations.
+            if (_colorMap.TryGetValue(hex, out string? exact))
+            {
+                // iPhone 13 / 14 / 15 / 16 rename some classic colors
+                bool is13Plus = IsIPhone13OrLater(productType);
+                if (is13Plus)
+                {
+                    if (exact == "Silver")     exact = "Starlight";
+                    if (exact == "Space Gray") exact = "Midnight";
+                }
+                return exact;
+            }
+
+            // ── Fallback: HSL heuristic ───────────────────────────────────
+            if (!TryParseHex(hex, out int r, out int g, out int b)) return "";
+
+            float rf = r / 255f, gf = g / 255f, bf2 = b / 255f;
+            float max = Math.Max(rf, Math.Max(gf, bf2));
+            float min = Math.Min(rf, Math.Min(gf, bf2));
+            float l   = (max + min) / 2f;
+            float s   = max == min ? 0 : (l < 0.5f
+                ? (max - min) / (max + min)
+                : (max - min) / (2f - max - min));
+
+            // Near-achromatic
+            if (s < 0.12f)
+            {
+                if (l > 0.75f) return IsIPhone13OrLater(productType) ? "Starlight" : "Silver";
+                if (l < 0.25f) return IsIPhone13OrLater(productType) ? "Midnight"  : "Space Gray";
+                return "Gray";
+            }
+
+            // Chromatic — compute hue
+            float h;
+            if (max == rf)      h = (gf - bf2) / (max - min);
+            else if (max == gf) h = 2f + (bf2 - rf) / (max - min);
+            else                h = 4f + (rf - gf) / (max - min);
+            h *= 60f;
+            if (h < 0) h += 360f;
+
+            if (h < 20 || h >= 340)
+                return s > 0.6f ? "(PRODUCT)RED" : "Pink";
+            if (h < 45)  return l < 0.5f ? "Gold"   : "Yellow";
+            if (h < 80)  return "Yellow";
+            if (h < 160) return "Green";
+            if (h < 200) return "Teal";
+            if (h < 260) return "Blue";
+            if (h < 300) return l < 0.4f ? "Deep Purple" : "Purple";
+            return "Pink";
+        }
+
+        private static bool IsIPhone13OrLater(string productType)
+        {
+            // iPhone14,x = iPhone 13 series; iPhone15,x = 14 series; etc.
+            if (!productType.StartsWith("iPhone", StringComparison.OrdinalIgnoreCase)) return false;
+            string digits = productType.Substring(6).Split(',')[0];
+            return int.TryParse(digits, out int n) && n >= 14;
+        }
+
+        private static bool TryParseHex(string hex, out int r, out int g, out int b)
+        {
+            r = g = b = 0;
+            string h = hex.TrimStart('#');
+            if (h.Length != 6) return false;
+            try
+            {
+                r = Convert.ToInt32(h.Substring(0, 2), 16);
+                g = Convert.ToInt32(h.Substring(2, 2), 16);
+                b = Convert.ToInt32(h.Substring(4, 2), 16);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Known exact DeviceColor hex → base color name
+        // (generation-specific renames applied in HexToColorName)
+        private static readonly Dictionary<string, string> _colorMap =
+            new(StringComparer.OrdinalIgnoreCase)
+        {
+            // ── Whites / Silvers / Starlights ─────────────────────────────
+            ["#E4E4E4"] = "Silver",
+            ["#F5F5F7"] = "Silver",
+            ["#E1E4E3"] = "Silver",
+            ["#F0EEEC"] = "Silver",
+            ["#F2EFE6"] = "Silver",   // Starlight (raw)
+            ["#FAF6F2"] = "Silver",
+            ["#F5F0E8"] = "Silver",
+            ["#F9F4EE"] = "Silver",
+            // ── Space Grays / Midnights / Blacks ──────────────────────────
+            ["#1B1B1B"] = "Space Gray",
+            ["#2C2C2C"] = "Space Gray",
+            ["#3C3C3C"] = "Space Gray",
+            ["#1A1A2E"] = "Space Gray",   // Midnight (raw)
+            ["#242526"] = "Space Gray",
+            ["#1C1B21"] = "Space Gray",   // Deep Purple (very dark)
+            ["#2D2640"] = "Deep Purple",
+            // ── Golds ─────────────────────────────────────────────────────
+            ["#F7E8D3"] = "Gold",
+            ["#D4AF8E"] = "Gold",
+            ["#F5E6D3"] = "Gold",
+            ["#FAE7C9"] = "Gold",
+            ["#F0DFC0"] = "Gold",
+            // ── Rose Golds / Pinks ────────────────────────────────────────
+            ["#F2C2B2"] = "Rose Gold",
+            ["#E8C8BC"] = "Rose Gold",
+            ["#FCE8E3"] = "Pink",
+            ["#F9D2CA"] = "Pink",
+            ["#FADADD"] = "Pink",
+            ["#F4C8BE"] = "Pink",
+            // ── (PRODUCT)RED ──────────────────────────────────────────────
+            ["#D32A2F"] = "(PRODUCT)RED",
+            ["#BF2026"] = "(PRODUCT)RED",
+            ["#C00017"] = "(PRODUCT)RED",
+            ["#CE0800"] = "(PRODUCT)RED",
+            ["#C8001A"] = "(PRODUCT)RED",
+            // ── Blues ─────────────────────────────────────────────────────
+            ["#215CCA"] = "Blue",
+            ["#225DC8"] = "Blue",
+            ["#2A4D8E"] = "Blue",
+            ["#4A89DC"] = "Blue",
+            ["#5BA4DC"] = "Sierra Blue",
+            ["#4680BF"] = "Blue",
+            ["#226DC8"] = "Blue",
+            // ── Greens ────────────────────────────────────────────────────
+            ["#5B8A58"] = "Green",
+            ["#4C9A6E"] = "Green",
+            ["#A8E0A0"] = "Green",
+            ["#4E5851"] = "Midnight Green",
+            ["#394A42"] = "Alpine Green",
+            ["#4A6741"] = "Green",
+            ["#3D6B45"] = "Green",
+            // ── Purples ───────────────────────────────────────────────────
+            ["#8E7EB0"] = "Purple",
+            ["#B4B0C8"] = "Purple",
+            ["#8979B4"] = "Purple",
+            ["#7B6FA0"] = "Purple",
+            // ── Yellows ───────────────────────────────────────────────────
+            ["#FDE68A"] = "Yellow",
+            ["#F5D470"] = "Yellow",
+            ["#FDD460"] = "Yellow",
+            ["#F4D03F"] = "Yellow",
+            // ── Orange ────────────────────────────────────────────────────
+            ["#F8954F"] = "Orange",
+            ["#E8732A"] = "Orange",
+        };
 
         // ── Model name lookup ─────────────────────────────────────────────
 
@@ -526,8 +720,10 @@ namespace iDeviceInfo
                 {
                     lines.Add($"── Device {i++} ───────────────────────────────────────────────");
                     lines.Add($"   DeviceName:    {info.DeviceName}");
-                    lines.Add($"   ModelName:     {info.ModelName}");
+                    lines.Add($"   Model:         {info.FullModelName}");
                     lines.Add($"   ProductType:   {info.ProductType}");
+                    lines.Add($"   Color:         {(string.IsNullOrEmpty(info.Color) ? "N/A" : info.Color)}");
+                    lines.Add($"   StorageGB:     {(info.StorageGB > 0 ? info.StorageGB + "GB" : "N/A")}");
                     lines.Add($"   iOSVersion:    {info.iOSVersion}");
                     lines.Add($"   SerialNumber:  {info.SerialNumber}");
                     lines.Add($"   IMEI:          {info.IMEI}");
