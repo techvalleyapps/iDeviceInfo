@@ -204,18 +204,24 @@ namespace iDeviceInfo
 
             if (msg == AMD.MSG_CONNECTED)
             {
-                // The Apple Mobile Device Service (AMDS) handles the Trust ceremony
-                // automatically — it sends the pairing request to the device and
-                // shows "Trust This Computer?" without any help from us.
-                // We must NOT call AMDevicePair() ourselves; doing so from a
-                // background thread corrupts the shared device handle and breaks
-                // the AMDS flow.
-                //
-                // Strategy:
-                //  • If already trusted → read everything now.
-                //  • If not trusted     → read basic pre-session fields only,
-                //                         then wait for MSG_PAIRED.
+                // ── Pairing ──────────────────────────────────────────────────
+                // If the device is not yet trusted we call AMDevicePair() here
+                // on the AMD/CF-RunLoop thread.  AMDevicePair communicates via
+                // USBMUX which is independent of CF RunLoop, so there is no
+                // deadlock — it just blocks this thread until the user taps
+                // "Trust" on the device (or the call times out).
+                // We do NOT spin a background thread because concurrent access
+                // to the same device handle from two threads corrupts state.
+                try
+                {
+                    AMD.AMDeviceConnect(device);
+                    if (AMD.AMDeviceValidatePairing(device) != 0)
+                        AMD.AMDevicePair(device); // blocks until Trust tapped
+                    AMD.AMDeviceDisconnect(device);
+                }
+                catch { try { AMD.AMDeviceDisconnect(device); } catch { } }
 
+                // Read all device fields (pairing cert should now be on disk)
                 DeviceInfo? di = ReadAllDeviceFields(device);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
@@ -228,17 +234,13 @@ namespace iDeviceInfo
             }
             else if (msg == AMD.MSG_PAIRED)
             {
-                // User tapped Trust → AMDS wrote the certificate to disk.
-                // Give it a moment to flush, then re-read all fields including
-                // the session-gated ones (IMEI, battery, storage, etc.).
-                Thread.Sleep(300);
+                // MSG_PAIRED can still arrive (e.g. AMDS-initiated pairing).
+                // If this device is already in our connected list the info is
+                // up to date; if not, read it now.
+                if (_handleToSerial.ContainsKey(device)) return;
 
-                DeviceInfo? di = null;
-                for (int attempt = 0; attempt < 3 && di == null; attempt++)
-                {
-                    di = ReadAllDeviceFields(device, isPaired: true);
-                    if (di == null) Thread.Sleep(500);
-                }
+                Thread.Sleep(400);
+                DeviceInfo? di = ReadAllDeviceFields(device, isPaired: true);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
                 _uiCtx!.Post(_ =>
