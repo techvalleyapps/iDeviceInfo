@@ -44,7 +44,7 @@ namespace iDeviceInfo.Forms
         private const int BtnW        = 110;
         private const int BtnH        = 32;
         private const int MarginRight  = 14;
-        private const int MarginBottom = 100;  // clears Windows notification toasts (~88 px)
+        private const int MarginBottom = 150;  // clears Windows notification toasts + extra 50 px
 
         // ── Constructor ───────────────────────────────────────────────────
 
