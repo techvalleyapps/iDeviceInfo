@@ -243,13 +243,18 @@ namespace iDeviceInfo
             else if (msg == AMD.MSG_PAIRED)
             {
                 // Trust accepted — by our app, 3uTools, Apple Devices, or AMDS.
-                // Wait for any in-flight connection (pairing thread / 3uTools) to
-                // finish and release the handle, then do a fresh read.
-                // Do NOT pre-disconnect — doing so while another process still holds
-                // a lockdown session corrupts state and makes AMDeviceConnect fail.
-                Thread.Sleep(1000);
+                // After AMDevicePair completes, the device's lockdown connection
+                // needs a moment to fully settle before AMDeviceConnect succeeds.
+                // Retry up to 5 times with 800 ms gaps (up to ~4 s total).
+                Thread.Sleep(800);
 
-                DeviceInfo? di = ReadAllDeviceFields(device);
+                DeviceInfo? di = null;
+                for (int attempt = 0; attempt < 5 && di == null; attempt++)
+                {
+                    if (attempt > 0) Thread.Sleep(800);
+                    di = ReadAllDeviceFields(device);
+                }
+
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
                 _uiCtx!.Post(_ =>
                 {
@@ -314,8 +319,15 @@ namespace iDeviceInfo
         {
             try
             {
-                // Connect — non-zero is non-fatal on some DLL versions.
-                AMD.AMDeviceConnect(device);
+                // Retry AMDeviceConnect — after pairing the lockdown daemon on the
+                // device needs a moment to accept new connections.
+                bool connected = false;
+                for (int i = 0; i < 3; i++)
+                {
+                    if (AMD.AMDeviceConnect(device) == 0) { connected = true; break; }
+                    Thread.Sleep(300);
+                }
+                if (!connected) return null;
 
                 var info = new DeviceInfo();
 
