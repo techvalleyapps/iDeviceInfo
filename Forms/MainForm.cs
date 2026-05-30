@@ -33,16 +33,16 @@ namespace iDeviceInfo.Forms
         private const int ROW_GAP    = 5;
         private const int FOOTER_H   = 52;
 
-        private static readonly int FORM_H =
-            HEADER_H + PY
-            + RowKeys.Length * (ROW_H + ROW_GAP) - ROW_GAP
-            + PY + 16 + FOOTER_H;   // ≈ 416
-
         private static readonly string[] RowKeys =
         {
             "Device Name", "Model", "iOS Build", "Serial Number",
             "IMEI", "IMEI 2", "Battery Level", "Battery Health", "UDID"
         };
+
+        private static readonly int FORM_H =
+            HEADER_H + PY
+            + RowKeys.Length * (ROW_H + ROW_GAP) - ROW_GAP
+            + PY + 16 + FOOTER_H;   // ≈ 416
 
         // ── Colors ────────────────────────────────────────────────────────
         private static readonly Color Bg         = Color.FromArgb(30,  30,  30);
