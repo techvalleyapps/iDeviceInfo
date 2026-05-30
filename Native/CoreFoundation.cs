@@ -83,6 +83,35 @@ namespace iDeviceInfo.Native
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
         public static extern void CFRunLoopStop(IntPtr runLoop);
 
+        /// <summary>
+        /// Runs the current thread's CF RunLoop in the given mode for up to
+        /// <paramref name="seconds"/> seconds, or until an event source fires
+        /// (when returnAfterSourceHandled = true).
+        /// Returns 0 = finished, 1 = stopped, 2 = timed out, 3 = no sources.
+        /// </summary>
+        [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int CFRunLoopRunInMode(
+            IntPtr mode, double seconds, bool returnAfterSourceHandled);
+
+        /// <summary>kCFRunLoopDefaultMode — the standard run loop mode string.</summary>
+        public static IntPtr CFRunLoopDefaultMode
+        {
+            get
+            {
+                // "kCFRunLoopDefaultMode" is a CFStringRef exported from CoreFoundation
+                try
+                {
+                    IntPtr sym = NativeLibrary.GetExport(
+                        NativeLibrary.Load(DllPath), "kCFRunLoopDefaultMode");
+                    // It's a CFStringRef* — dereference to get the actual pointer
+                    return sym != IntPtr.Zero
+                        ? System.Runtime.InteropServices.Marshal.ReadIntPtr(sym)
+                        : IntPtr.Zero;
+                }
+                catch { return IntPtr.Zero; }
+            }
+        }
+
         // ── Release ───────────────────────────────────────────────────────
 
         [DllImport(DllPath, CallingConvention = CallingConvention.Cdecl)]
