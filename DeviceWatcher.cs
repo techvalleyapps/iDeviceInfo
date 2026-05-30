@@ -242,12 +242,14 @@ namespace iDeviceInfo
             }
             else if (msg == AMD.MSG_PAIRED)
             {
-                // Trust accepted (via our pairing thread OR 3uTools OR Apple Devices).
-                // Wait briefly for the pairing thread to finish disconnecting, then
-                // read all fields.  Always re-read even if device is already in our
-                // map — the previous entry was untrusted and missing session fields.
-                Thread.Sleep(600);
-                DeviceInfo? di = ReadAllDeviceFields(device, isPaired: true);
+                // Trust accepted — by our app, 3uTools, Apple Devices, or AMDS.
+                // Wait for any in-flight connection (pairing thread / 3uTools) to
+                // finish and release the handle, then do a fresh read.
+                // Do NOT pre-disconnect — doing so while another process still holds
+                // a lockdown session corrupts state and makes AMDeviceConnect fail.
+                Thread.Sleep(1000);
+
+                DeviceInfo? di = ReadAllDeviceFields(device);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
                 _uiCtx!.Post(_ =>
                 {
@@ -287,50 +289,32 @@ namespace iDeviceInfo
         /// </summary>
         private static void PairDevice(IntPtr device)
         {
-            // 1. Register a CF RunLoop for this thread — required so AMDevicePair
-            //    can post the device's Trust reply back as a CF source event.
-            IntPtr threadRunLoop = IntPtr.Zero;
-            try { threadRunLoop = CF.CFRunLoopGetCurrent(); } catch { }
+            // Register a CF RunLoop for this thread before any AMD calls.
+            try { CF.CFRunLoopGetCurrent(); } catch { }
 
             try
             {
-                if (AMD.AMDeviceConnect(device) != 0) return;
+                AMD.AMDeviceConnect(device);
 
-                // 2. AMDevicePair sends the pairing request to the device,
-                //    which shows "Trust This Computer?" on screen.
-                //    The call blocks waiting for a response posted on the CF RunLoop.
-                int pairResult = AMD.AMDevicePair(device);
-
-                // 3. Pump this thread's CF RunLoop briefly to flush any pending
-                //    events (e.g. the completion callback from AMDevicePair).
-                if (threadRunLoop != IntPtr.Zero)
-                {
-                    IntPtr mode = CF.CFRunLoopDefaultMode;
-                    for (int i = 0; i < 10; i++)
-                    {
-                        int r = CF.CFRunLoopRunInMode(mode, 0.1, true);
-                        if (r == 3) break; // kCFRunLoopRunFinished — no more sources
-                    }
-                }
+                // AMDevicePair sends the pairing request to the device ("Trust This
+                // Computer?" appears on screen) then blocks on USBMUX socket recv
+                // until the user taps Trust or the call times out.
+                // When it returns the certificate is written to disk and MSG_PAIRED
+                // fires on the AMD thread so ReadAllDeviceFields runs there.
+                AMD.AMDevicePair(device);
             }
             catch { }
             finally
             {
                 try { AMD.AMDeviceDisconnect(device); } catch { }
             }
-            // MSG_PAIRED will now fire on the AMD thread → ReadAllDeviceFields runs there
         }
 
-        private DeviceInfo? ReadAllDeviceFields(IntPtr device, bool isPaired = false)
+        private DeviceInfo? ReadAllDeviceFields(IntPtr device)
         {
             try
             {
-                // On MSG_PAIRED the device may still be in "connected" state from the
-                // earlier MSG_CONNECTED attempt.  Disconnect first for a clean slate.
-                if (isPaired)
-                    try { AMD.AMDeviceDisconnect(device); } catch { }
-
-                // Connect — non-zero return is non-fatal on some DLL versions.
+                // Connect — non-zero is non-fatal on some DLL versions.
                 AMD.AMDeviceConnect(device);
 
                 var info = new DeviceInfo();
