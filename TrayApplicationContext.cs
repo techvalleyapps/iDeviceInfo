@@ -147,7 +147,7 @@ namespace iDeviceInfo
             item.Click += (_, _) =>
             {
                 if (_devices.TryGetValue(serial, out var info))
-                    _window.UpdateDevice(info);
+                    _window.SelectDevice(info.SerialNumber);
                 _window.ShowFromTray();
             };
             _menuItems[serial] = item;
