@@ -89,8 +89,8 @@ namespace iDeviceInfo
                 UpdateTrayState();
                 _floatingBtn.UpdateDevice(info);
 
-                // Update the unified window with this device's data
-                _window.UpdateDevice(info);
+                // Add/update device in the unified window (side panel + content)
+                _window.AddDevice(info);
 
                 if (isNew)
                 {
@@ -109,17 +109,14 @@ namespace iDeviceInfo
                 if (_lastSerial == serial)
                     _lastSerial = _devices.Count > 0 ? _devices.Keys.First() : null;
 
-                // Show next device if any, otherwise clear
+                // Remove device from unified window (it selects next or clears itself)
+                _window.RemoveDevice(serial);
+
+                // Keep floating button in sync
                 if (_lastSerial != null)
-                {
-                    _window.UpdateDevice(_devices[_lastSerial]);
                     _floatingBtn.UpdateDevice(_devices[_lastSerial]);
-                }
                 else
-                {
-                    _window.ClearDevice();
                     _floatingBtn.UpdateDevice(null);
-                }
 
                 UpdateTrayState();
                 ShowBalloon("Device Disconnected", $"{info.DeviceName} disconnected.");

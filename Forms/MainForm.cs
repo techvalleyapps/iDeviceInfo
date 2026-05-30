@@ -104,6 +104,7 @@ namespace iDeviceInfo.Forms
         protected override void WndProc(ref Message m)
         {
             const int WM_SYSCOMMAND = 0x0112;
+            const int WM_ACTIVATE   = 0x0006;
             const int SC_MINIMIZE   = 0xF020;
             const int SC_RESTORE    = 0xF120;
 
@@ -111,8 +112,17 @@ namespace iDeviceInfo.Forms
             {
                 int cmd = m.WParam.ToInt32() & 0xFFF0;
                 if (cmd == SC_MINIMIZE) { WindowState = FormWindowState.Minimized; return; }
-                if (cmd == SC_RESTORE)  { WindowState = FormWindowState.Normal;    return; }
+                if (cmd == SC_RESTORE)  { WindowState = FormWindowState.Normal; Activate(); return; }
             }
+
+            // Clicking the taskbar button on a minimized borderless form sends WM_ACTIVATE
+            // before WM_SYSCOMMAND/SC_RESTORE — restore here so the toggle works.
+            if (m.Msg == WM_ACTIVATE && (m.WParam.ToInt32() & 0xFFFF) != 0)
+            {
+                if (WindowState == FormWindowState.Minimized)
+                    WindowState = FormWindowState.Normal;
+            }
+
             base.WndProc(ref m);
         }
 
