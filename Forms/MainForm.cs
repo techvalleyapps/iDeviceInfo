@@ -99,7 +99,7 @@ namespace iDeviceInfo.Forms
             Size            = new Size(FormW, FormH);
             StartPosition   = FormStartPosition.Manual;
             ShowInTaskbar   = true;
-            TopMost         = true;           // stays above Windows notifications
+            TopMost         = false;
             KeyPreview      = true;
 
             // Position bottom-right near tray on first launch
@@ -354,10 +354,10 @@ namespace iDeviceInfo.Forms
         public void ShowFromTray()
         {
             if (InvokeRequired) { Invoke(ShowFromTray); return; }
-            ShowInTaskbar   = true;
-            TopMost         = true;
-            WindowState     = FormWindowState.Normal;
+            ShowInTaskbar = true;
             Show();
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = FormWindowState.Normal;
             Activate();
             BringToFront();
         }
