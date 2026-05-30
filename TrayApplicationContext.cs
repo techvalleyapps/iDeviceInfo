@@ -54,7 +54,7 @@ namespace iDeviceInfo
             // ── Tray icon ──────────────────────────────────────────────────
             _tray = new NotifyIcon
             {
-                Icon    = BuildTrayIcon(connected: false),
+                Icon    = Forms.MainForm.LoadAppIcon() ?? BuildTrayIcon(connected: false),
                 Text    = "iDeviceInfo — No device connected",
                 Visible = true
             };
