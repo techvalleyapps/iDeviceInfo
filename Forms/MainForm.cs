@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
 using System.Windows.Forms;
 
 namespace iDeviceInfo.Forms
@@ -44,6 +45,7 @@ namespace iDeviceInfo.Forms
             // ── Form settings ─────────────────────────────────────────────
             Text             = "iDeviceInfo";
             FormBorderStyle  = FormBorderStyle.None;
+            Icon             = LoadAppIcon();
             BackColor        = BgColor;
             Size             = new Size(W, H);
             StartPosition    = FormStartPosition.Manual;
@@ -220,6 +222,18 @@ namespace iDeviceInfo.Forms
             Show();
             WindowState = FormWindowState.Normal;
             Activate();
+        }
+
+        internal static Icon? LoadAppIcon()
+        {
+            try
+            {
+                string path = Path.Combine(
+                    AppContext.BaseDirectory, "Resources", "iDeviceInfo.ico");
+                if (File.Exists(path)) return new Icon(path);
+            }
+            catch { }
+            return null;
         }
 
         private void MakeDraggable(Control ctrl)

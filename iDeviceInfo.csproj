@@ -14,6 +14,7 @@
 
     <!-- Require admin so AMDevicePair() can write to C:\ProgramData\Apple\Lockdown\ -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Resources\iDeviceInfo.ico</ApplicationIcon>
 
     <!-- Single-file self-contained exe for distribution -->
     <PublishSingleFile>true</PublishSingleFile>
@@ -29,5 +30,12 @@
     <Description>iOS device info reader - reads Serial, IMEI, Battery Health from connected devices</Description>
     <Copyright>2025</Copyright>
   </PropertyGroup>
+
+
+  <ItemGroup>
+    <Content Include="Resources\iDeviceInfo.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 
 </Project>

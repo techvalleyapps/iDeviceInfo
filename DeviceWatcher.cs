@@ -204,47 +204,18 @@ namespace iDeviceInfo
 
             if (msg == AMD.MSG_CONNECTED)
             {
-                // ── Trust check ───────────────────────────────────────────────
-                // Check pairing status while still on the AMD thread (fast, no
-                // blocking).  If the device is not yet trusted we start a
-                // dedicated pairing thread and wait for MSG_PAIRED.
+                // The Apple Mobile Device Service (AMDS) handles the Trust ceremony
+                // automatically — it sends the pairing request to the device and
+                // shows "Trust This Computer?" without any help from us.
+                // We must NOT call AMDevicePair() ourselves; doing so from a
+                // background thread corrupts the shared device handle and breaks
+                // the AMDS flow.
                 //
-                // IMPORTANT: AMDevicePair() is a BLOCKING call — it sends the
-                // pairing request and then waits for the user to tap Trust on
-                // the device (can take 10-30 s).  Calling it from inside the
-                // CF RunLoop callback deadlocks the RunLoop, so we offload it.
+                // Strategy:
+                //  • If already trusted → read everything now.
+                //  • If not trusted     → read basic pre-session fields only,
+                //                         then wait for MSG_PAIRED.
 
-                bool trusted = false;
-                try
-                {
-                    AMD.AMDeviceConnect(device);
-                    trusted = AMD.AMDeviceValidatePairing(device) == 0;
-                    AMD.AMDeviceDisconnect(device);
-                }
-                catch { try { AMD.AMDeviceDisconnect(device); } catch { } }
-
-                if (!trusted)
-                {
-                    // Kick off pairing on its own thread so the CF RunLoop stays free.
-                    // Once the user taps Trust the cert is written to disk and
-                    // MobileDevice.dll fires MSG_PAIRED — we handle that below.
-                    var devHandle = device;
-                    new Thread(() =>
-                    {
-                        try
-                        {
-                            AMD.AMDeviceConnect(devHandle);
-                            AMD.AMDevicePair(devHandle);      // blocks until Trust or timeout
-                            AMD.AMDeviceDisconnect(devHandle);
-                        }
-                        catch { try { AMD.AMDeviceDisconnect(devHandle); } catch { } }
-                    })
-                    { IsBackground = true, Name = "iDeviceInfo-Pair" }.Start();
-
-                    return; // wait for MSG_PAIRED before reading device info
-                }
-
-                // Already trusted — read everything right now.
                 DeviceInfo? di = ReadAllDeviceFields(device);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
@@ -257,9 +228,17 @@ namespace iDeviceInfo
             }
             else if (msg == AMD.MSG_PAIRED)
             {
-                // User tapped Trust — pairing cert is now on disk.
-                // Re-read with a clean connection so we get the full session fields.
-                DeviceInfo? di = ReadAllDeviceFields(device, isPaired: true);
+                // User tapped Trust → AMDS wrote the certificate to disk.
+                // Give it a moment to flush, then re-read all fields including
+                // the session-gated ones (IMEI, battery, storage, etc.).
+                Thread.Sleep(300);
+
+                DeviceInfo? di = null;
+                for (int attempt = 0; attempt < 3 && di == null; attempt++)
+                {
+                    di = ReadAllDeviceFields(device, isPaired: true);
+                    if (di == null) Thread.Sleep(500);
+                }
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
 
                 _uiCtx!.Post(_ =>
