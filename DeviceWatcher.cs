@@ -204,45 +204,51 @@ namespace iDeviceInfo
 
             if (msg == AMD.MSG_CONNECTED)
             {
-                // ── Pairing ──────────────────────────────────────────────────
-                // If the device is not yet trusted we call AMDevicePair() here
-                // on the AMD/CF-RunLoop thread.  AMDevicePair communicates via
-                // USBMUX which is independent of CF RunLoop, so there is no
-                // deadlock — it just blocks this thread until the user taps
-                // "Trust" on the device (or the call times out).
-                // We do NOT spin a background thread because concurrent access
-                // to the same device handle from two threads corrupts state.
+                // Quick trust check — no session, just validate pairing
+                bool trusted = false;
                 try
                 {
                     AMD.AMDeviceConnect(device);
-                    if (AMD.AMDeviceValidatePairing(device) != 0)
-                        AMD.AMDevicePair(device); // blocks until Trust tapped
+                    trusted = AMD.AMDeviceValidatePairing(device) == 0;
                     AMD.AMDeviceDisconnect(device);
                 }
                 catch { try { AMD.AMDeviceDisconnect(device); } catch { } }
 
-                // Read all device fields (pairing cert should now be on disk)
-                DeviceInfo? di = ReadAllDeviceFields(device);
-                if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
-
-                _uiCtx!.Post(_ =>
+                if (trusted)
                 {
-                    _handleToSerial[device]     = di.SerialNumber;
-                    _connected[di.SerialNumber] = di;
-                    DeviceConnected?.Invoke(this, di);
-                }, null);
+                    // Already trusted — read everything now on the AMD thread
+                    DeviceInfo? di = ReadAllDeviceFields(device);
+                    if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
+                    _uiCtx!.Post(_ =>
+                    {
+                        _handleToSerial[device]     = di.SerialNumber;
+                        _connected[di.SerialNumber] = di;
+                        DeviceConnected?.Invoke(this, di);
+                    }, null);
+                }
+                else
+                {
+                    // Not trusted — initiate pairing on a dedicated thread.
+                    // That thread has its OWN CF RunLoop so AMDevicePair can
+                    // deliver the Trust response without touching the AMD thread's
+                    // RunLoop.  We do NOT call ReadAllDeviceFields here — the
+                    // pairing thread is the sole owner of the device handle until
+                    // it finishes.  MSG_PAIRED will arrive once the user taps Trust
+                    // and we read all fields there.
+                    var devHandle = device;
+                    new Thread(() => PairDevice(devHandle))
+                    { IsBackground = true, Name = "iDeviceInfo-Pair" }.Start();
+                }
             }
             else if (msg == AMD.MSG_PAIRED)
             {
-                // MSG_PAIRED can still arrive (e.g. AMDS-initiated pairing).
-                // If this device is already in our connected list the info is
-                // up to date; if not, read it now.
-                if (_handleToSerial.ContainsKey(device)) return;
-
-                Thread.Sleep(400);
+                // Trust accepted (via our pairing thread OR 3uTools OR Apple Devices).
+                // Wait briefly for the pairing thread to finish disconnecting, then
+                // read all fields.  Always re-read even if device is already in our
+                // map — the previous entry was untrusted and missing session fields.
+                Thread.Sleep(600);
                 DeviceInfo? di = ReadAllDeviceFields(device, isPaired: true);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
-
                 _uiCtx!.Post(_ =>
                 {
                     _handleToSerial[device]     = di.SerialNumber;
@@ -267,6 +273,53 @@ namespace iDeviceInfo
         }
 
         // ── Device field reading (AMD thread) ─────────────────────────────
+
+        // ── Pairing (runs on its own thread) ─────────────────────────────
+
+        /// <summary>
+        /// Calls AMDevicePair on a dedicated thread that has its own CF RunLoop.
+        /// AMDevicePair needs a RunLoop on the calling thread so it can receive
+        /// the device's Trust response — using the AMD thread's RunLoop would
+        /// deadlock because that thread is blocked in its own callback.
+        ///
+        /// This method is the sole accessor of the device handle while it runs.
+        /// ReadAllDeviceFields is called from MSG_PAIRED after this returns.
+        /// </summary>
+        private static void PairDevice(IntPtr device)
+        {
+            // 1. Register a CF RunLoop for this thread — required so AMDevicePair
+            //    can post the device's Trust reply back as a CF source event.
+            IntPtr threadRunLoop = IntPtr.Zero;
+            try { threadRunLoop = CF.CFRunLoopGetCurrent(); } catch { }
+
+            try
+            {
+                if (AMD.AMDeviceConnect(device) != 0) return;
+
+                // 2. AMDevicePair sends the pairing request to the device,
+                //    which shows "Trust This Computer?" on screen.
+                //    The call blocks waiting for a response posted on the CF RunLoop.
+                int pairResult = AMD.AMDevicePair(device);
+
+                // 3. Pump this thread's CF RunLoop briefly to flush any pending
+                //    events (e.g. the completion callback from AMDevicePair).
+                if (threadRunLoop != IntPtr.Zero)
+                {
+                    IntPtr mode = CF.CFRunLoopDefaultMode;
+                    for (int i = 0; i < 10; i++)
+                    {
+                        int r = CF.CFRunLoopRunInMode(mode, 0.1, true);
+                        if (r == 3) break; // kCFRunLoopRunFinished — no more sources
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                try { AMD.AMDeviceDisconnect(device); } catch { }
+            }
+            // MSG_PAIRED will now fire on the AMD thread → ReadAllDeviceFields runs there
+        }
 
         private DeviceInfo? ReadAllDeviceFields(IntPtr device, bool isPaired = false)
         {
