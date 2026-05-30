@@ -10,7 +10,7 @@ namespace iDeviceInfo.Forms
     /// <summary>
     /// Unified main window.
     ///
-    /// Left side panel  — device list, visible when 2+ devices connected.
+    /// Left side panel  — always visible; lists connected devices.
     ///                    Click any entry to switch to that device's details.
     /// Right content    — device info rows with per-row Copy buttons.
     ///
@@ -20,18 +20,19 @@ namespace iDeviceInfo.Forms
     public sealed class MainForm : Form
     {
         // ── Dimensions ────────────────────────────────────────────────────
-        private const int SIDE_W     = 132;   // left device-list panel
-        private const int SEP_W      = 1;     // divider
-        private const int CONTENT_W  = 466;   // right panel (same as original)
-        private const int HEADER_H   = 50;
-        private const int PX         = 18;
-        private const int PY         = 12;
-        private const int LABEL_W    = 130;
-        private const int VALUE_W    = 230;
-        private const int COPY_W     = 54;
-        private const int ROW_H      = 26;
-        private const int ROW_GAP    = 5;
-        private const int FOOTER_H   = 52;
+        private const int SIDE_W    = 132;   // left device-list panel
+        private const int SEP_W     = 1;     // divider
+        private const int CONTENT_W = 466;   // right info panel
+        private const int FULL_W    = SIDE_W + SEP_W + CONTENT_W;  // 599
+        private const int HEADER_H  = 50;
+        private const int PX        = 18;
+        private const int PY        = 12;
+        private const int LABEL_W   = 130;
+        private const int VALUE_W   = 230;
+        private const int COPY_W    = 54;
+        private const int ROW_H     = 26;
+        private const int ROW_GAP   = 5;
+        private const int FOOTER_H  = 52;
 
         private static readonly string[] RowKeys =
         {
@@ -45,38 +46,36 @@ namespace iDeviceInfo.Forms
             + PY + 16 + FOOTER_H;   // ≈ 416
 
         // ── Colors ────────────────────────────────────────────────────────
-        private static readonly Color Bg         = Color.FromArgb(30,  30,  30);
-        private static readonly Color HeaderBg   = Color.FromArgb(20,  20,  20);
-        private static readonly Color SideBg     = Color.FromArgb(24,  24,  24);
-        private static readonly Color SideSelBg  = Color.FromArgb(40,  40,  40);
-        private static readonly Color Accent     = Color.FromArgb(10,  132, 255);
-        private static readonly Color LabelFg    = Color.FromArgb(160, 160, 160);
-        private static readonly Color ValueFg    = Color.White;
-        private static readonly Color BorderCol  = Color.FromArgb(60,  60,  60);
-        private static readonly Color BtnBg      = Color.FromArgb(55,  55,  55);
-        private static readonly Color BtnHover   = Color.FromArgb(75,  75,  75);
-        private static readonly Color Dim        = Color.FromArgb(70,  70,  70);
+        private static readonly Color Bg        = Color.FromArgb(30,  30,  30);
+        private static readonly Color HeaderBg  = Color.FromArgb(20,  20,  20);
+        private static readonly Color SideBg    = Color.FromArgb(24,  24,  24);
+        private static readonly Color SideSelBg = Color.FromArgb(40,  40,  40);
+        private static readonly Color Accent    = Color.FromArgb(10,  132, 255);
+        private static readonly Color LabelFg   = Color.FromArgb(160, 160, 160);
+        private static readonly Color ValueFg   = Color.White;
+        private static readonly Color BorderCol = Color.FromArgb(60,  60,  60);
+        private static readonly Color BtnBg     = Color.FromArgb(55,  55,  55);
+        private static readonly Color BtnHover  = Color.FromArgb(75,  75,  75);
+        private static readonly Color Dim       = Color.FromArgb(70,  70,  70);
 
         // ── Fonts ─────────────────────────────────────────────────────────
-        private readonly Font _title   = new("Segoe UI Semibold", 11f);
-        private readonly Font _sub     = new("Segoe UI",           8.5f);
-        private readonly Font _lbl     = new("Segoe UI",           9f);
-        private readonly Font _val     = new("Segoe UI",           9f, FontStyle.Bold);
-        private readonly Font _btn     = new("Segoe UI",           8f);
-        private readonly Font _sideName= new("Segoe UI Semibold",  8.5f);
-        private readonly Font _sideMod = new("Segoe UI",           7.5f);
-        private readonly Font _sideCap = new("Segoe UI",           7f,  FontStyle.Bold);
+        private readonly Font _title    = new("Segoe UI Semibold", 11f);
+        private readonly Font _sub      = new("Segoe UI",           8.5f);
+        private readonly Font _lbl      = new("Segoe UI",           9f);
+        private readonly Font _val      = new("Segoe UI",           9f, FontStyle.Bold);
+        private readonly Font _btn      = new("Segoe UI",           8f);
+        private readonly Font _sideName = new("Segoe UI Semibold",  8.5f);
+        private readonly Font _sideMod  = new("Segoe UI",           7.5f);
+        private readonly Font _sideCap  = new("Segoe UI",           7f,  FontStyle.Bold);
 
         // ── Live controls ─────────────────────────────────────────────────
-        private readonly Label   _hTitle;
-        private readonly Label   _hSub;
-        private readonly Label[] _vals  = new Label[RowKeys.Length];
+        private readonly Label    _hTitle;
+        private readonly Label    _hSub;
+        private readonly Label[]  _vals = new Label[RowKeys.Length];
         private readonly Button[] _cpys = new Button[RowKeys.Length];
-        private readonly Button  _cpyAll;
+        private readonly Button   _cpyAll;
 
         // ── Side panel ────────────────────────────────────────────────────
-        private readonly Panel _side;
-        private readonly Panel _sideSep;
         private readonly Panel _sideList;   // scrollable area for device entries
         private readonly Dictionary<string, Panel> _entries = new(StringComparer.OrdinalIgnoreCase);
 
@@ -134,14 +133,14 @@ namespace iDeviceInfo.Forms
             FormBorderStyle = FormBorderStyle.None;
             Icon            = LoadAppIcon();
             BackColor       = BorderCol;           // 1-px border via form background
-            ClientSize      = new Size(CONTENT_W, FORM_H);
+            ClientSize      = new Size(FULL_W, FORM_H);
             StartPosition   = FormStartPosition.Manual;
             ShowInTaskbar   = true;
             TopMost         = false;
             KeyPreview      = true;
 
             var wa = Screen.PrimaryScreen!.WorkingArea;
-            Location = new Point(wa.Right - CONTENT_W - 12, wa.Bottom - FORM_H - 12);
+            Location = new Point(wa.Right - FULL_W - 12, wa.Bottom - FORM_H - 12);
 
             KeyDown     += (_, e) => { if (e.KeyCode == Keys.Escape) HideToTray(); };
             FormClosing += (_, e) => { e.Cancel = true; HideToTray(); };
@@ -150,18 +149,18 @@ namespace iDeviceInfo.Forms
             var inner = new Panel
             {
                 Location  = new Point(1, 1),
-                Size      = new Size(CONTENT_W - 2, FORM_H - 2),
+                Size      = new Size(FULL_W - 2, FORM_H - 2),
                 BackColor = Bg,
                 Anchor    = AnchorStyles.Top | AnchorStyles.Bottom |
                             AnchorStyles.Left | AnchorStyles.Right
             };
             Controls.Add(inner);
 
-            // ── Header ────────────────────────────────────────────────────
+            // ── Header (full width) ───────────────────────────────────────
             var header = new Panel
             {
                 Location  = new Point(0, 0),
-                Size      = new Size(CONTENT_W - 2, HEADER_H),
+                Size      = new Size(FULL_W - 2, HEADER_H),
                 BackColor = HeaderBg,
                 Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
@@ -200,27 +199,26 @@ namespace iDeviceInfo.Forms
             };
             header.Controls.Add(_hSub);
 
-            // ─ button → minimize to taskbar
-            var minBtn = HeaderBtn("─", new Point(CONTENT_W - 2 - 54, 4));
+            // ─ button → minimize to taskbar  (anchored to right edge of full-width header)
+            var minBtn = HeaderBtn("─", new Point(FULL_W - 2 - 54, 4));
             minBtn.Click += (_, _) => WindowState = FormWindowState.Minimized;
             header.Controls.Add(minBtn);
 
             // ✕ button → hide to tray
-            var cls = HeaderBtn("✕", new Point(CONTENT_W - 2 - 28, 4));
+            var cls = HeaderBtn("✕", new Point(FULL_W - 2 - 28, 4));
             cls.Click += (_, _) => HideToTray();
             header.Controls.Add(cls);
 
-            // ── Side panel (hidden; shown when 2+ devices) ────────────────
-            _side = new Panel
+            // ── Side panel (always visible) ───────────────────────────────
+            var side = new Panel
             {
                 Location  = new Point(0, HEADER_H),
                 Size      = new Size(SIDE_W, FORM_H - HEADER_H - 2),
-                BackColor = SideBg,
-                Visible   = false
+                BackColor = SideBg
             };
-            inner.Controls.Add(_side);
+            inner.Controls.Add(side);
 
-            _side.Controls.Add(new Label
+            side.Controls.Add(new Label
             {
                 Text      = "DEVICES",
                 Font      = _sideCap,
@@ -229,7 +227,7 @@ namespace iDeviceInfo.Forms
                 Size      = new Size(SIDE_W - 14, 14),
                 TextAlign = ContentAlignment.MiddleLeft
             });
-            _side.Controls.Add(new Panel
+            side.Controls.Add(new Panel
             {
                 Location  = new Point(0, 26),
                 Size      = new Size(SIDE_W, 1),
@@ -243,20 +241,18 @@ namespace iDeviceInfo.Forms
                 BackColor  = SideBg,
                 AutoScroll = true
             };
-            _side.Controls.Add(_sideList);
+            side.Controls.Add(_sideList);
 
-            // Separator between side and content
-            _sideSep = new Panel
+            // Separator between side and content (always visible)
+            inner.Controls.Add(new Panel
             {
                 Location  = new Point(SIDE_W, HEADER_H),
                 Size      = new Size(SEP_W, FORM_H - HEADER_H - 2),
-                BackColor = BorderCol,
-                Visible   = false
-            };
-            inner.Controls.Add(_sideSep);
+                BackColor = BorderCol
+            });
 
-            // ── Content rows ──────────────────────────────────────────────
-            int cx = 0;   // content x-offset (0 when no side panel)
+            // ── Content rows (offset right by side panel + separator) ──────
+            int cx = SIDE_W + SEP_W;
             int y  = HEADER_H + PY;
 
             for (int i = 0; i < RowKeys.Length; i++)
@@ -300,18 +296,18 @@ namespace iDeviceInfo.Forms
             y += 2;
             inner.Controls.Add(new Panel
             {
-                Location  = new Point(PX, y),
+                Location  = new Point(cx + PX, y),
                 Size      = new Size(CONTENT_W - PX * 2 - 4, 1),
                 BackColor = BorderCol
             });
             y += 14;
 
             // Footer buttons
-            var hideTray = Btn("Hide to tray", new Point(PX, y), new Size(118, 34));
+            var hideTray = Btn("Hide to tray", new Point(cx + PX, y), new Size(118, 34));
             hideTray.Click += (_, _) => HideToTray();
             inner.Controls.Add(hideTray);
 
-            _cpyAll = Btn("Copy All", new Point(CONTENT_W - PX - 2 - 148, y), new Size(148, 34));
+            _cpyAll = Btn("Copy All", new Point(cx + CONTENT_W - PX - 2 - 148, y), new Size(148, 34));
             _cpyAll.Font                       = new Font("Segoe UI Semibold", 9f);
             _cpyAll.BackColor                  = Accent;
             _cpyAll.ForeColor                  = Color.White;
@@ -326,7 +322,7 @@ namespace iDeviceInfo.Forms
 
             MakeDraggable(inner);
             MakeDraggable(header);
-            MakeDraggable(_side);
+            MakeDraggable(side);
         }
 
         // ── Public API ────────────────────────────────────────────────────
@@ -337,7 +333,6 @@ namespace iDeviceInfo.Forms
             _devs[info.SerialNumber] = info;
             RefreshSideList();
             SelectDevice(info.SerialNumber);
-            ApplyLayout();
         }
 
         public void RemoveDevice(string serial)
@@ -345,7 +340,6 @@ namespace iDeviceInfo.Forms
             if (InvokeRequired) { Invoke(() => RemoveDevice(serial)); return; }
             _devs.Remove(serial);
             RefreshSideList();
-            ApplyLayout();
 
             if (_sel == serial)
             {
@@ -379,7 +373,7 @@ namespace iDeviceInfo.Forms
 
         private void FillContent(DeviceInfo d)
         {
-            string batt = d.BatteryLevel + (d.IsCharging ? "  (Charging)" : "");
+            string batt  = d.BatteryLevel + (d.IsCharging ? "  (Charging)" : "");
             string imei2 = string.IsNullOrEmpty(d.IMEI2) || d.IMEI2 == "N/A" ? "—" : d.IMEI2;
 
             string[] display = { d.DeviceName, d.FullModelName, d.iOSVersion,
@@ -428,7 +422,7 @@ namespace iDeviceInfo.Forms
             int ey = 2;
             foreach (var (serial, info) in _devs)
             {
-                string s = serial;
+                string s        = serial;
                 bool   selected = s == _sel;
 
                 var entry = new Panel
@@ -497,55 +491,6 @@ namespace iDeviceInfo.Forms
                 p.BackColor = sel ? SideSelBg : SideBg;
                 if (p.Controls.Count > 0)
                     p.Controls[0].BackColor = sel ? Accent : Color.Transparent;
-            }
-        }
-
-        // ── Layout (expand / collapse side panel) ─────────────────────────
-
-        private void ApplyLayout()
-        {
-            bool show = _devs.Count >= 2;
-            if (_side.Visible == show) return;
-
-            _side.Visible    = show;
-            _sideSep.Visible = show;
-
-            int newW = show ? (SIDE_W + SEP_W + CONTENT_W) : CONTENT_W;
-
-            // Shift content controls to make room (or reclaim space)
-            int dx = show ? (SIDE_W + SEP_W) : -(SIDE_W + SEP_W);
-            ShiftContentControls(dx);
-
-            // Expand or shrink the form, keeping the right edge fixed
-            int rightEdge = Right;
-            ClientSize = new Size(newW, FORM_H);
-            Left       = rightEdge - Width;
-
-            // Resize the inner panel and header
-            if (Controls[0] is Panel inner)
-            {
-                inner.Size = new Size(newW - 2, FORM_H - 2);
-                if (inner.Controls[0] is Panel hdr)
-                    hdr.Width = newW - 2;
-            }
-        }
-
-        /// <summary>
-        /// Shifts all content controls (rows, separator, footer buttons) by dx.
-        /// Header and side panel are excluded.
-        /// </summary>
-        private void ShiftContentControls(int dx)
-        {
-            if (Controls[0] is not Panel inner) return;
-
-            foreach (Control c in inner.Controls)
-            {
-                // Skip header, side panel, side separator — only move row/footer controls
-                if (c == _side || c == _sideSep) continue;
-                if (c is Panel hdr && hdr.Location.Y == 0 && hdr.Location.X == 0 &&
-                    hdr.Height == HEADER_H) continue;
-
-                c.Left += dx;
             }
         }
 
