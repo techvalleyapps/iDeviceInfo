@@ -70,12 +70,8 @@ namespace iDeviceInfo
 
             _refreshItem.Click += (_, _) => _watcher.Restart();
             _debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
-            showItem.Click     += (_, _) => _mainForm.ShowFromTray();
-            exitItem.Click     += (_, _) =>
-            {
-                _tray.Visible = false;
-                Application.Exit();
-            };
+            showItem.Click += (_, _) => _mainForm.ShowFromTray();
+            exitItem.Click += (_, _) => ExitApp();
 
             menu.Items.Add(_deviceSeparator);
             menu.Items.Add(_refreshItem);
@@ -155,7 +151,11 @@ namespace iDeviceInfo
                 ShowBalloon("Device Disconnected", $"{info.DeviceName} disconnected.");
             };
 
-            // Delay Start() until AFTER Application.Run() starts the message pump.
+            // ── Show-window signal (from a second launch attempt) ─────────────
+            Program.ShowWindowRequested += () =>
+                _mainForm.Invoke(() => _mainForm.ShowFromTray());
+
+            // ── Delay Start() until AFTER Application.Run() starts the pump ──
             EventHandler? onIdle = null;
             onIdle = (_, _) =>
             {
@@ -287,6 +287,19 @@ namespace iDeviceInfo
             _tray.BalloonTipText  = message;
             _tray.BalloonTipIcon  = ToolTipIcon.Info;
             _tray.ShowBalloonTip(4000);
+        }
+
+        // ── Exit ─────────────────────────────────────────────────────────
+
+        private void ExitApp()
+        {
+            try { _tray.Visible = false; } catch { }
+            try { _watcher.Dispose(); }   catch { }
+            try { _popup?.Dispose(); }    catch { }
+            try { _mainForm.Dispose(); }  catch { }
+            try { _floatingBtn.Dispose(); } catch { }
+            try { _tray.Dispose(); }      catch { }
+            Environment.Exit(0);          // hard kill — ensures no ghost process
         }
 
         // ── Cleanup ───────────────────────────────────────────────────────
