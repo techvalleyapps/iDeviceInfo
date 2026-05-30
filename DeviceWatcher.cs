@@ -82,6 +82,12 @@ namespace iDeviceInfo
         private readonly Dictionary<string, DeviceInfo> _connected      = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<IntPtr, string>     _handleToSerial = new();
 
+        // ── Pairing synchronisation ───────────────────────────────────────
+
+        // Starts in the "set" (complete) state so MSG_PAIRED never waits
+        // unless a pairing thread is actually running.
+        private readonly ManualResetEventSlim _pairingComplete = new(true);
+
         // ── Diagnostics ───────────────────────────────────────────────────
 
         private int     _callbackFireCount;
@@ -229,32 +235,33 @@ namespace iDeviceInfo
                 else
                 {
                     // Not trusted — initiate pairing on a dedicated thread.
-                    // That thread has its OWN CF RunLoop so AMDevicePair can
-                    // deliver the Trust response without touching the AMD thread's
-                    // RunLoop.  We do NOT call ReadAllDeviceFields here — the
-                    // pairing thread is the sole owner of the device handle until
-                    // it finishes.  MSG_PAIRED will arrive once the user taps Trust
-                    // and we read all fields there.
+                    // We mark _pairingComplete as "in progress" NOW, before the
+                    // thread starts, so MSG_PAIRED always waits for it even if
+                    // the thread runs very quickly.
+                    _pairingComplete.Reset();
                     var devHandle = device;
-                    new Thread(() => PairDevice(devHandle))
+                    new Thread(() =>
+                    {
+                        try   { PairDevice(devHandle); }
+                        finally { _pairingComplete.Set(); } // unblock MSG_PAIRED
+                    })
                     { IsBackground = true, Name = "iDeviceInfo-Pair" }.Start();
                 }
             }
             else if (msg == AMD.MSG_PAIRED)
             {
-                // Trust accepted — by our app, 3uTools, Apple Devices, or AMDS.
-                // After AMDevicePair completes, the device's lockdown connection
-                // needs a moment to fully settle before AMDeviceConnect succeeds.
-                // Retry up to 5 times with 800 ms gaps (up to ~4 s total).
-                Thread.Sleep(800);
+                // MSG_PAIRED fires INSIDE AMDevicePair before it returns, so the
+                // pairing thread still owns the device connection at this point.
+                // Wait for the thread to finish (AMDevicePair return + Disconnect)
+                // before we touch the handle.  Timeout 90 s covers the slowest user.
+                // When trust comes from 3uTools/Apple Devices the event is already
+                // set (no pairing thread running) so the wait returns immediately.
+                _pairingComplete.Wait(TimeSpan.FromSeconds(90));
 
-                DeviceInfo? di = null;
-                for (int attempt = 0; attempt < 5 && di == null; attempt++)
-                {
-                    if (attempt > 0) Thread.Sleep(800);
-                    di = ReadAllDeviceFields(device);
-                }
+                // Small extra settle time for the lockdown daemon to be ready.
+                Thread.Sleep(500);
 
+                DeviceInfo? di = ReadAllDeviceFields(device);
                 if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
                 _uiCtx!.Post(_ =>
                 {
