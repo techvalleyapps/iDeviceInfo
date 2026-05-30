@@ -166,7 +166,7 @@ namespace iDeviceInfo.Forms
             };
             inner.Controls.Add(header);
 
-            header.Controls.Add(new Label
+            var hIcon = new Label
             {
                 Text      = "",
                 Font      = new Font("Segoe UI Emoji", 16f),
@@ -174,7 +174,8 @@ namespace iDeviceInfo.Forms
                 Location  = new Point(PX, 8),
                 Size      = new Size(34, 34),
                 TextAlign = ContentAlignment.MiddleCenter
-            });
+            };
+            header.Controls.Add(hIcon);
 
             _hTitle = new Label
             {
@@ -322,6 +323,9 @@ namespace iDeviceInfo.Forms
 
             MakeDraggable(inner);
             MakeDraggable(header);
+            MakeDraggable(hIcon);
+            MakeDraggable(_hTitle);
+            MakeDraggable(_hSub);
             MakeDraggable(side);
         }
 
@@ -546,9 +550,22 @@ namespace iDeviceInfo.Forms
 
         private void MakeDraggable(Control c)
         {
-            c.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) { _dragging = true; _dragPt = e.Location; } };
-            c.MouseMove += (_, e) => { if (!_dragging) return; var p = Cursor.Position; Location = new Point(p.X - _dragPt.X, p.Y - _dragPt.Y); };
-            c.MouseUp   += (_, _) => _dragging = false;
+            c.MouseDown += (_, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                _dragging = true;
+                // Convert click to screen coords and store offset from form origin,
+                // so dragging from any child (at any nesting depth) works correctly.
+                var screen = c.PointToScreen(e.Location);
+                _dragPt = new Point(screen.X - Left, screen.Y - Top);
+            };
+            c.MouseMove += (_, e) =>
+            {
+                if (!_dragging) return;
+                var p = Cursor.Position;
+                Location = new Point(p.X - _dragPt.X, p.Y - _dragPt.Y);
+            };
+            c.MouseUp += (_, _) => _dragging = false;
         }
 
         internal static Icon? LoadAppIcon()
