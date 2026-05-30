@@ -2,353 +2,356 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
-using System.Runtime.InteropServices;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace iDeviceInfo.Forms
 {
     /// <summary>
-    /// Unified main window — replaces both MainForm and DeviceInfoForm.
+    /// Unified main window.
     ///
-    /// Behaviour:
-    ///   ─  Minimize  → standard Windows minimize to taskbar
-    ///   ✕  Close     → hide to system tray (app keeps running)
-    ///   TopMost      → stays above Windows toast notifications
+    /// Left side panel  — device list, visible when 2+ devices connected.
+    ///                    Click any entry to switch to that device's details.
+    /// Right content    — device info rows with per-row Copy buttons.
     ///
-    /// Starts in "waiting" state; UpdateDevice() fills in the rows when a device
-    /// connects; ClearDevice() resets them when it disconnects.
+    /// ─  Minimize      → standard Windows minimize to taskbar (toggle works).
+    /// ✕  Close         → hide to system tray (app keeps running).
     /// </summary>
     public sealed class MainForm : Form
     {
-        // ── Layout constants ──────────────────────────────────────────────
-        private const int PX          = 18;   // horizontal padding
-        private const int PY          = 12;   // vertical padding
-        private const int LabelW      = 130;
-        private const int ValueW      = 230;
-        private const int CopyW       = 54;
-        private const int RowH        = 26;
-        private const int RowGap      = 5;
-        private const int HeaderH     = 50;
-        private const int FooterH     = 52;
+        // ── Dimensions ────────────────────────────────────────────────────
+        private const int SIDE_W     = 132;   // left device-list panel
+        private const int SEP_W      = 1;     // divider
+        private const int CONTENT_W  = 466;   // right panel (same as original)
+        private const int HEADER_H   = 50;
+        private const int PX         = 18;
+        private const int PY         = 12;
+        private const int LABEL_W    = 130;
+        private const int VALUE_W    = 230;
+        private const int COPY_W     = 54;
+        private const int ROW_H      = 26;
+        private const int ROW_GAP    = 5;
+        private const int FOOTER_H   = 52;
 
-        // 9 fixed rows — IMEI 2 shows "—" when not applicable
+        private static readonly int FORM_H =
+            HEADER_H + PY
+            + RowKeys.Length * (ROW_H + ROW_GAP) - ROW_GAP
+            + PY + 16 + FOOTER_H;   // ≈ 416
+
         private static readonly string[] RowKeys =
         {
             "Device Name", "Model", "iOS Build", "Serial Number",
             "IMEI", "IMEI 2", "Battery Level", "Battery Health", "UDID"
         };
 
-        private static readonly int FormW =
-            PX * 2 + LabelW + 8 + ValueW + 8 + CopyW;          // 466
-
-        private static readonly int FormH =
-            HeaderH + PY
-            + RowKeys.Length * (RowH + RowGap) - RowGap
-            + PY + 2 + 14 + FooterH;                            // ≈ 413
-
         // ── Colors ────────────────────────────────────────────────────────
-        private static readonly Color BgColor      = Color.FromArgb(30,  30,  30);
-        private static readonly Color HeaderColor   = Color.FromArgb(20,  20,  20);
-        private static readonly Color AccentColor   = Color.FromArgb(10,  132, 255);
-        private static readonly Color LabelColor    = Color.FromArgb(160, 160, 160);
-        private static readonly Color ValueColor    = Color.White;
-        private static readonly Color CopyBtnColor  = Color.FromArgb(55,  55,  55);
-        private static readonly Color CopyBtnHover  = Color.FromArgb(75,  75,  75);
-        private static readonly Color BorderColor   = Color.FromArgb(60,  60,  60);
-        private static readonly Color DisabledColor = Color.FromArgb(70,  70,  70);
+        private static readonly Color Bg         = Color.FromArgb(30,  30,  30);
+        private static readonly Color HeaderBg   = Color.FromArgb(20,  20,  20);
+        private static readonly Color SideBg     = Color.FromArgb(24,  24,  24);
+        private static readonly Color SideSelBg  = Color.FromArgb(40,  40,  40);
+        private static readonly Color Accent     = Color.FromArgb(10,  132, 255);
+        private static readonly Color LabelFg    = Color.FromArgb(160, 160, 160);
+        private static readonly Color ValueFg    = Color.White;
+        private static readonly Color BorderCol  = Color.FromArgb(60,  60,  60);
+        private static readonly Color BtnBg      = Color.FromArgb(55,  55,  55);
+        private static readonly Color BtnHover   = Color.FromArgb(75,  75,  75);
+        private static readonly Color Dim        = Color.FromArgb(70,  70,  70);
 
         // ── Fonts ─────────────────────────────────────────────────────────
-        private readonly Font _titleFont = new("Segoe UI Semibold", 11f);
-        private readonly Font _subFont   = new("Segoe UI",          8.5f);
-        private readonly Font _labelFont = new("Segoe UI",          9f);
-        private readonly Font _valueFont = new("Segoe UI",          9f, FontStyle.Bold);
-        private readonly Font _btnFont   = new("Segoe UI",          8f);
+        private readonly Font _title   = new("Segoe UI Semibold", 11f);
+        private readonly Font _sub     = new("Segoe UI",           8.5f);
+        private readonly Font _lbl     = new("Segoe UI",           9f);
+        private readonly Font _val     = new("Segoe UI",           9f, FontStyle.Bold);
+        private readonly Font _btn     = new("Segoe UI",           8f);
+        private readonly Font _sideName= new("Segoe UI Semibold",  8.5f);
+        private readonly Font _sideMod = new("Segoe UI",           7.5f);
+        private readonly Font _sideCap = new("Segoe UI",           7f,  FontStyle.Bold);
 
         // ── Live controls ─────────────────────────────────────────────────
-        private readonly Label  _headerTitle;   // device name (or "iDeviceInfo")
-        private readonly Label  _headerSub;     // model      (or "No device connected")
-        private readonly Label[]  _valueLabels = new Label[RowKeys.Length];
-        private readonly Button[] _copyButtons  = new Button[RowKeys.Length];
-        private readonly Button   _copyAllBtn;
+        private readonly Label   _hTitle;
+        private readonly Label   _hSub;
+        private readonly Label[] _vals  = new Label[RowKeys.Length];
+        private readonly Button[] _cpys = new Button[RowKeys.Length];
+        private readonly Button  _cpyAll;
+
+        // ── Side panel ────────────────────────────────────────────────────
+        private readonly Panel _side;
+        private readonly Panel _sideSep;
+        private readonly Panel _sideList;   // scrollable area for device entries
+        private readonly Dictionary<string, Panel> _entries = new(StringComparer.OrdinalIgnoreCase);
+
+        // ── Device state ──────────────────────────────────────────────────
+        private readonly Dictionary<string, DeviceInfo> _devs =
+            new(StringComparer.OrdinalIgnoreCase);
+        private string? _sel;   // currently selected serial
 
         // ── Drag ──────────────────────────────────────────────────────────
-        private Point _dragStart;
+        private Point _dragPt;
         private bool  _dragging;
 
-        // ── Current device ────────────────────────────────────────────────
-        private DeviceInfo? _device;
+        // ── Taskbar minimize/restore fix for borderless forms ─────────────
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.Style |= 0x00020000  // WS_MINIMIZEBOX
+                          | 0x00080000; // WS_SYSMENU
+                return cp;
+            }
+        }
 
-        // ── WinAPI for minimize-to-taskbar on borderless form ─────────────
-        [DllImport("user32.dll")]
-        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
-        [DllImport("user32.dll")]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-        private const int GWL_STYLE    = -16;
-        private const int WS_MINIMIZEBOX = 0x00020000;
-        private const int WS_SYSMENU    = 0x00080000;
+        protected override void WndProc(ref Message m)
+        {
+            const int WM_SYSCOMMAND = 0x0112;
+            const int SC_MINIMIZE   = 0xF020;
+            const int SC_RESTORE    = 0xF120;
+
+            if (m.Msg == WM_SYSCOMMAND)
+            {
+                int cmd = m.WParam.ToInt32() & 0xFFF0;
+                if (cmd == SC_MINIMIZE) { WindowState = FormWindowState.Minimized; return; }
+                if (cmd == SC_RESTORE)  { WindowState = FormWindowState.Normal;    return; }
+            }
+            base.WndProc(ref m);
+        }
 
         // ─────────────────────────────────────────────────────────────────
 
         public MainForm()
         {
-            // ── Form settings ─────────────────────────────────────────────
             Text            = "iDeviceInfo";
             FormBorderStyle = FormBorderStyle.None;
             Icon            = LoadAppIcon();
-            BackColor       = BgColor;
-            Size            = new Size(FormW, FormH);
+            BackColor       = BorderCol;           // 1-px border via form background
+            ClientSize      = new Size(CONTENT_W, FORM_H);
             StartPosition   = FormStartPosition.Manual;
             ShowInTaskbar   = true;
             TopMost         = false;
             KeyPreview      = true;
 
-            // Position bottom-right near tray on first launch
             var wa = Screen.PrimaryScreen!.WorkingArea;
-            Location = new Point(wa.Right - FormW - 12, wa.Bottom - FormH - 12);
+            Location = new Point(wa.Right - CONTENT_W - 12, wa.Bottom - FORM_H - 12);
 
-            KeyDown += (_, e) =>
-            {
-                if (e.KeyCode == Keys.Escape) HideToTray();
-            };
+            KeyDown     += (_, e) => { if (e.KeyCode == Keys.Escape) HideToTray(); };
+            FormClosing += (_, e) => { e.Cancel = true; HideToTray(); };
 
-            // ── Border frame ──────────────────────────────────────────────
-            var border = new Panel
-            {
-                Location  = Point.Empty,
-                Size      = new Size(FormW, FormH),
-                BackColor = BorderColor
-            };
-            Controls.Add(border);
-
+            // ── Main inner panel (1-px inset = the "border") ──────────────
             var inner = new Panel
             {
                 Location  = new Point(1, 1),
-                Size      = new Size(FormW - 2, FormH - 2),
-                BackColor = BgColor
+                Size      = new Size(CONTENT_W - 2, FORM_H - 2),
+                BackColor = Bg,
+                Anchor    = AnchorStyles.Top | AnchorStyles.Bottom |
+                            AnchorStyles.Left | AnchorStyles.Right
             };
-            border.Controls.Add(inner);
+            Controls.Add(inner);
 
             // ── Header ────────────────────────────────────────────────────
             var header = new Panel
             {
-                Location  = Point.Empty,
-                Size      = new Size(FormW - 2, HeaderH),
-                BackColor = HeaderColor
+                Location  = new Point(0, 0),
+                Size      = new Size(CONTENT_W - 2, HEADER_H),
+                BackColor = HeaderBg,
+                Anchor    = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
             inner.Controls.Add(header);
 
-            var phoneIcon = new Label
+            header.Controls.Add(new Label
             {
                 Text      = "",
                 Font      = new Font("Segoe UI Emoji", 16f),
-                ForeColor = AccentColor,
+                ForeColor = Accent,
                 Location  = new Point(PX, 8),
                 Size      = new Size(34, 34),
                 TextAlign = ContentAlignment.MiddleCenter
-            };
-            header.Controls.Add(phoneIcon);
+            });
 
-            _headerTitle = new Label
+            _hTitle = new Label
             {
                 Text         = "iDeviceInfo",
-                Font         = _titleFont,
-                ForeColor    = ValueColor,
+                Font         = _title,
+                ForeColor    = ValueFg,
                 Location     = new Point(PX + 38, 7),
-                Size         = new Size(FormW - PX * 2 - 38 - 56, 22),
+                Size         = new Size(300, 22),
                 TextAlign    = ContentAlignment.MiddleLeft,
                 AutoEllipsis = true
             };
-            header.Controls.Add(_headerTitle);
+            header.Controls.Add(_hTitle);
 
-            _headerSub = new Label
+            _hSub = new Label
             {
                 Text      = "No device connected",
-                Font      = _subFont,
-                ForeColor = LabelColor,
+                Font      = _sub,
+                ForeColor = LabelFg,
                 Location  = new Point(PX + 38, 28),
-                Size      = new Size(FormW - PX * 2 - 38 - 56, 16),
+                Size      = new Size(300, 16),
                 TextAlign = ContentAlignment.MiddleLeft
             };
-            header.Controls.Add(_headerSub);
+            header.Controls.Add(_hSub);
 
-            // Minimize button (─) → standard Windows minimize to taskbar
-            var minBtn = MakeHeaderBtn("─", new Point(FormW - 2 - 54, 4));
+            // ─ button → minimize to taskbar
+            var minBtn = HeaderBtn("─", new Point(CONTENT_W - 2 - 54, 4));
             minBtn.Click += (_, _) => WindowState = FormWindowState.Minimized;
             header.Controls.Add(minBtn);
 
-            // Close button (✕) → hide to tray
-            var closeBtn = MakeHeaderBtn("✕", new Point(FormW - 2 - 28, 4));
-            closeBtn.Click += (_, _) => HideToTray();
-            header.Controls.Add(closeBtn);
+            // ✕ button → hide to tray
+            var cls = HeaderBtn("✕", new Point(CONTENT_W - 2 - 28, 4));
+            cls.Click += (_, _) => HideToTray();
+            header.Controls.Add(cls);
 
-            // ── Rows ──────────────────────────────────────────────────────
-            int y = HeaderH + PY;
+            // ── Side panel (hidden; shown when 2+ devices) ────────────────
+            _side = new Panel
+            {
+                Location  = new Point(0, HEADER_H),
+                Size      = new Size(SIDE_W, FORM_H - HEADER_H - 2),
+                BackColor = SideBg,
+                Visible   = false
+            };
+            inner.Controls.Add(_side);
+
+            _side.Controls.Add(new Label
+            {
+                Text      = "DEVICES",
+                Font      = _sideCap,
+                ForeColor = LabelFg,
+                Location  = new Point(10, 8),
+                Size      = new Size(SIDE_W - 14, 14),
+                TextAlign = ContentAlignment.MiddleLeft
+            });
+            _side.Controls.Add(new Panel
+            {
+                Location  = new Point(0, 26),
+                Size      = new Size(SIDE_W, 1),
+                BackColor = BorderCol
+            });
+
+            _sideList = new Panel
+            {
+                Location   = new Point(0, 28),
+                Size       = new Size(SIDE_W, FORM_H - HEADER_H - 30),
+                BackColor  = SideBg,
+                AutoScroll = true
+            };
+            _side.Controls.Add(_sideList);
+
+            // Separator between side and content
+            _sideSep = new Panel
+            {
+                Location  = new Point(SIDE_W, HEADER_H),
+                Size      = new Size(SEP_W, FORM_H - HEADER_H - 2),
+                BackColor = BorderCol,
+                Visible   = false
+            };
+            inner.Controls.Add(_sideSep);
+
+            // ── Content rows ──────────────────────────────────────────────
+            int cx = 0;   // content x-offset (0 when no side panel)
+            int y  = HEADER_H + PY;
+
             for (int i = 0; i < RowKeys.Length; i++)
             {
-                int xi = PX;
+                int x = cx + PX;
 
-                var lbl = new Label
+                inner.Controls.Add(new Label
                 {
                     Text      = RowKeys[i] + ":",
-                    Font      = _labelFont,
-                    ForeColor = LabelColor,
-                    Location  = new Point(xi, y + 5),
-                    Size      = new Size(LabelW, RowH),
+                    Font      = _lbl,
+                    ForeColor = LabelFg,
+                    Location  = new Point(x, y + 5),
+                    Size      = new Size(LABEL_W, ROW_H),
                     TextAlign = ContentAlignment.TopLeft
-                };
-                inner.Controls.Add(lbl);
-                xi += LabelW + 8;
+                });
+                x += LABEL_W + 8;
 
-                var val = new Label
+                var valLbl = new Label
                 {
                     Text         = "—",
-                    Font         = _valueFont,
-                    ForeColor    = DisabledColor,
-                    Location     = new Point(xi, y + 5),
-                    Size         = new Size(ValueW, RowH),
+                    Font         = _val,
+                    ForeColor    = Dim,
+                    Location     = new Point(x, y + 5),
+                    Size         = new Size(VALUE_W, ROW_H),
                     TextAlign    = ContentAlignment.TopLeft,
                     AutoEllipsis = true
                 };
-                inner.Controls.Add(val);
-                _valueLabels[i] = val;
-                xi += ValueW + 8;
+                inner.Controls.Add(valLbl);
+                _vals[i] = valLbl;
+                x += VALUE_W + 8;
 
-                var copy = MakeButton("Copy", new Point(xi, y + 2), new Size(CopyW, 22));
-                copy.Enabled = false;
-                copy.Click += (_, _) =>
-                {
-                    try { Clipboard.SetText(val.Text); }
-                    catch { }
-                };
-                inner.Controls.Add(copy);
-                _copyButtons[i] = copy;
+                var cpy = Btn("Copy", new Point(x, y + 2), new Size(COPY_W, 22));
+                cpy.Enabled = false;
+                inner.Controls.Add(cpy);
+                _cpys[i] = cpy;
 
-                y += RowH + RowGap;
+                y += ROW_H + ROW_GAP;
             }
 
-            // ── Separator ─────────────────────────────────────────────────
+            // Separator above footer
             y += 2;
             inner.Controls.Add(new Panel
             {
                 Location  = new Point(PX, y),
-                Size      = new Size(FormW - 2 - PX * 2, 1),
-                BackColor = BorderColor
+                Size      = new Size(CONTENT_W - PX * 2 - 4, 1),
+                BackColor = BorderCol
             });
             y += 14;
 
-            // ── Footer ────────────────────────────────────────────────────
-            // Minimize-to-tray label (left)
-            var minToTrayBtn = MakeButton("Hide to tray", new Point(PX, y), new Size(120, 34));
-            minToTrayBtn.Click += (_, _) => HideToTray();
-            inner.Controls.Add(minToTrayBtn);
+            // Footer buttons
+            var hideTray = Btn("Hide to tray", new Point(PX, y), new Size(118, 34));
+            hideTray.Click += (_, _) => HideToTray();
+            inner.Controls.Add(hideTray);
 
-            // Copy All (right) — blue, disabled until device connected
-            _copyAllBtn = MakeButton("Copy All", new Point(FormW - 2 - PX - (LabelW + 8 + ValueW)/2, y),
-                new Size((LabelW + 8 + ValueW) / 2, 34));
-            _copyAllBtn.Font                           = new Font("Segoe UI Semibold", 9f);
-            _copyAllBtn.BackColor                      = AccentColor;
-            _copyAllBtn.ForeColor                      = Color.White;
-            _copyAllBtn.FlatAppearance.BorderColor     = AccentColor;
-            _copyAllBtn.Enabled                        = false;
-            _copyAllBtn.Click += (_, _) =>
+            _cpyAll = Btn("Copy All", new Point(CONTENT_W - PX - 2 - 148, y), new Size(148, 34));
+            _cpyAll.Font                       = new Font("Segoe UI Semibold", 9f);
+            _cpyAll.BackColor                  = Accent;
+            _cpyAll.ForeColor                  = Color.White;
+            _cpyAll.FlatAppearance.BorderColor = Accent;
+            _cpyAll.Enabled                    = false;
+            _cpyAll.Click += (_, _) =>
             {
-                if (_device == null) return;
-                try { Clipboard.SetText(_device.ToClipboardText()); }
-                catch { }
+                if (_sel != null && _devs.TryGetValue(_sel, out var d))
+                    try { Clipboard.SetText(d.ToClipboardText()); } catch { }
             };
-            inner.Controls.Add(_copyAllBtn);
+            inner.Controls.Add(_cpyAll);
 
-            // ── Drag ──────────────────────────────────────────────────────
             MakeDraggable(inner);
             MakeDraggable(header);
-
-            // ── Close → tray ──────────────────────────────────────────────
-            FormClosing += (_, e) =>
-            {
-                e.Cancel = true;
-                HideToTray();
-            };
-        }
-
-        // ── Minimise-to-taskbar on borderless form ────────────────────────
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            // Add WS_MINIMIZEBOX + WS_SYSMENU so Windows allows minimize on a
-            // borderless form and the taskbar button responds correctly.
-            int style = GetWindowLong(Handle, GWL_STYLE);
-            SetWindowLong(Handle, GWL_STYLE, style | WS_MINIMIZEBOX | WS_SYSMENU);
+            MakeDraggable(_side);
         }
 
         // ── Public API ────────────────────────────────────────────────────
 
-        /// <summary>Called when a device connects — fills all rows with real data.</summary>
-        public void UpdateDevice(DeviceInfo info)
+        public void AddDevice(DeviceInfo info)
         {
-            if (InvokeRequired) { Invoke(() => UpdateDevice(info)); return; }
-
-            _device = info;
-
-            string batteryVal = info.BatteryLevel + (info.IsCharging ? "  (Charging)" : "");
-
-            var values = new[]
-            {
-                info.DeviceName,
-                info.FullModelName,
-                info.iOSVersion,
-                info.SerialNumber,
-                info.IMEI,
-                string.IsNullOrEmpty(info.IMEI2) || info.IMEI2 == "N/A" ? "—" : info.IMEI2,
-                batteryVal,
-                info.BatteryHealth,
-                info.UDID
-            };
-
-            // Special copy value for Battery Level (strip charging emoji)
-            var copyValues = new[]
-            {
-                info.DeviceName, info.FullModelName, info.iOSVersion,
-                info.SerialNumber, info.IMEI,
-                string.IsNullOrEmpty(info.IMEI2) || info.IMEI2 == "N/A" ? "—" : info.IMEI2,
-                info.BatteryLevel + (info.IsCharging ? " (Charging)" : ""),
-                info.BatteryHealth, info.UDID
-            };
-
-            for (int i = 0; i < RowKeys.Length; i++)
-            {
-                _valueLabels[i].Text      = values[i];
-                _valueLabels[i].ForeColor = ValueColor;
-
-                string cv = copyValues[i];
-                _copyButtons[i].Enabled = cv != "—";
-                _copyButtons[i].Tag     = cv;
-                _copyButtons[i].Click  -= CopyTag; // remove old handler
-                _copyButtons[i].Click  += CopyTag;
-            }
-
-            _headerTitle.Text = info.DeviceName;
-            _headerSub.Text   = info.FullModelName;
-            _copyAllBtn.Enabled = true;
+            if (InvokeRequired) { Invoke(() => AddDevice(info)); return; }
+            _devs[info.SerialNumber] = info;
+            RefreshSideList();
+            SelectDevice(info.SerialNumber);
+            ApplyLayout();
         }
 
-        /// <summary>Called when the device disconnects — resets all rows.</summary>
-        public void ClearDevice()
+        public void RemoveDevice(string serial)
         {
-            if (InvokeRequired) { Invoke(ClearDevice); return; }
+            if (InvokeRequired) { Invoke(() => RemoveDevice(serial)); return; }
+            _devs.Remove(serial);
+            RefreshSideList();
+            ApplyLayout();
 
-            _device = null;
-
-            for (int i = 0; i < RowKeys.Length; i++)
+            if (_sel == serial)
             {
-                _valueLabels[i].Text      = "—";
-                _valueLabels[i].ForeColor = DisabledColor;
-                _copyButtons[i].Enabled   = false;
+                string? next = _devs.Keys.FirstOrDefault();
+                if (next != null) SelectDevice(next);
+                else { _sel = null; ClearContent(); }
             }
+        }
 
-            _headerTitle.Text   = "iDeviceInfo";
-            _headerSub.Text     = "No device connected";
-            _copyAllBtn.Enabled = false;
+        public void SelectDevice(string serial)
+        {
+            if (InvokeRequired) { Invoke(() => SelectDevice(serial)); return; }
+            if (!_devs.TryGetValue(serial, out var info)) return;
+            _sel = serial;
+            FillContent(info);
+            HighlightEntry(serial);
         }
 
         public void ShowFromTray()
@@ -362,90 +365,243 @@ namespace iDeviceInfo.Forms
             BringToFront();
         }
 
-        // ── Helpers ───────────────────────────────────────────────────────
+        // ── Content fill / clear ──────────────────────────────────────────
 
-        private void HideToTray()
+        private void FillContent(DeviceInfo d)
         {
-            Hide();
-            ShowInTaskbar = false;
+            string batt = d.BatteryLevel + (d.IsCharging ? "  (Charging)" : "");
+            string imei2 = string.IsNullOrEmpty(d.IMEI2) || d.IMEI2 == "N/A" ? "—" : d.IMEI2;
+
+            string[] display = { d.DeviceName, d.FullModelName, d.iOSVersion,
+                                 d.SerialNumber, d.IMEI, imei2, batt, d.BatteryHealth, d.UDID };
+            string[] copy    = { d.DeviceName, d.FullModelName, d.iOSVersion,
+                                 d.SerialNumber, d.IMEI, imei2 == "—" ? "" : imei2,
+                                 d.BatteryLevel + (d.IsCharging ? " (Charging)" : ""),
+                                 d.BatteryHealth, d.UDID };
+
+            for (int i = 0; i < RowKeys.Length; i++)
+            {
+                _vals[i].Text      = display[i];
+                _vals[i].ForeColor = display[i] == "—" ? Dim : ValueFg;
+                _cpys[i].Enabled   = !string.IsNullOrEmpty(copy[i]) && copy[i] != "—";
+                string cv = copy[i];
+                _cpys[i].Click -= CopyTag;
+                _cpys[i].Tag    = cv;
+                _cpys[i].Click += CopyTag;
+            }
+
+            _hTitle.Text    = d.DeviceName;
+            _hSub.Text      = d.FullModelName;
+            _cpyAll.Enabled = true;
         }
 
-        private static void CopyTag(object? sender, EventArgs e)
+        private void ClearContent()
         {
-            if (sender is Button btn)
-                try { Clipboard.SetText(btn.Tag?.ToString() ?? ""); } catch { }
+            foreach (var l in _vals)  { l.Text = "—"; l.ForeColor = Dim; }
+            foreach (var b in _cpys)    b.Enabled = false;
+            _hTitle.Text    = "iDeviceInfo";
+            _hSub.Text      = "No device connected";
+            _cpyAll.Enabled = false;
         }
 
-        private Button MakeHeaderBtn(string text, Point location)
+        // ── Side panel ────────────────────────────────────────────────────
+
+        private void RefreshSideList()
         {
-            var btn = new Button
+            foreach (var p in _entries.Values)
+            {
+                _sideList.Controls.Remove(p);
+                p.Dispose();
+            }
+            _entries.Clear();
+
+            int ey = 2;
+            foreach (var (serial, info) in _devs)
+            {
+                string s = serial;
+                bool   selected = s == _sel;
+
+                var entry = new Panel
+                {
+                    Location  = new Point(0, ey),
+                    Size      = new Size(SIDE_W, 52),
+                    BackColor = selected ? SideSelBg : SideBg,
+                    Cursor    = Cursors.Hand
+                };
+
+                // Coloured left-edge indicator
+                var bar = new Panel
+                {
+                    Location  = new Point(0, 0),
+                    Size      = new Size(3, 52),
+                    BackColor = selected ? Accent : Color.Transparent
+                };
+                entry.Controls.Add(bar);
+
+                var nameLbl = new Label
+                {
+                    Text         = info.DeviceName,
+                    Font         = _sideName,
+                    ForeColor    = ValueFg,
+                    Location     = new Point(10, 8),
+                    Size         = new Size(SIDE_W - 14, 18),
+                    AutoEllipsis = true,
+                    TextAlign    = ContentAlignment.MiddleLeft
+                };
+                entry.Controls.Add(nameLbl);
+
+                var modLbl = new Label
+                {
+                    Text         = string.IsNullOrEmpty(info.ModelName) ? info.ProductType : info.ModelName,
+                    Font         = _sideMod,
+                    ForeColor    = LabelFg,
+                    Location     = new Point(10, 28),
+                    Size         = new Size(SIDE_W - 14, 16),
+                    AutoEllipsis = true,
+                    TextAlign    = ContentAlignment.MiddleLeft
+                };
+                entry.Controls.Add(modLbl);
+
+                void OnClick() => SelectDevice(s);
+                void OnEnter() { if (_sel != s) entry.BackColor = SideSelBg; }
+                void OnLeave() { if (_sel != s) entry.BackColor = SideBg; }
+
+                foreach (Control c in new Control[] { entry, nameLbl, modLbl })
+                {
+                    c.Click      += (_, _) => OnClick();
+                    c.MouseEnter += (_, _) => OnEnter();
+                    c.MouseLeave += (_, _) => OnLeave();
+                }
+
+                _sideList.Controls.Add(entry);
+                _entries[serial] = entry;
+                ey += 54;
+            }
+        }
+
+        private void HighlightEntry(string serial)
+        {
+            foreach (var (s, p) in _entries)
+            {
+                bool sel = s == serial;
+                p.BackColor = sel ? SideSelBg : SideBg;
+                if (p.Controls.Count > 0)
+                    p.Controls[0].BackColor = sel ? Accent : Color.Transparent;
+            }
+        }
+
+        // ── Layout (expand / collapse side panel) ─────────────────────────
+
+        private void ApplyLayout()
+        {
+            bool show = _devs.Count >= 2;
+            if (_side.Visible == show) return;
+
+            _side.Visible    = show;
+            _sideSep.Visible = show;
+
+            int newW = show ? (SIDE_W + SEP_W + CONTENT_W) : CONTENT_W;
+
+            // Shift content controls to make room (or reclaim space)
+            int dx = show ? (SIDE_W + SEP_W) : -(SIDE_W + SEP_W);
+            ShiftContentControls(dx);
+
+            // Expand or shrink the form, keeping the right edge fixed
+            int rightEdge = Right;
+            ClientSize = new Size(newW, FORM_H);
+            Left       = rightEdge - Width;
+
+            // Resize the inner panel and header
+            if (Controls[0] is Panel inner)
+            {
+                inner.Size = new Size(newW - 2, FORM_H - 2);
+                if (inner.Controls[0] is Panel hdr)
+                    hdr.Width = newW - 2;
+            }
+        }
+
+        /// <summary>
+        /// Shifts all content controls (rows, separator, footer buttons) by dx.
+        /// Header and side panel are excluded.
+        /// </summary>
+        private void ShiftContentControls(int dx)
+        {
+            if (Controls[0] is not Panel inner) return;
+
+            foreach (Control c in inner.Controls)
+            {
+                // Skip header, side panel, side separator — only move row/footer controls
+                if (c == _side || c == _sideSep) continue;
+                if (c is Panel hdr && hdr.Location.Y == 0 && hdr.Location.X == 0 &&
+                    hdr.Height == HEADER_H) continue;
+
+                c.Left += dx;
+            }
+        }
+
+        // ── UI helpers ────────────────────────────────────────────────────
+
+        private void HideToTray() { Hide(); ShowInTaskbar = false; }
+
+        private static void CopyTag(object? s, EventArgs _)
+        {
+            if (s is Button b && b.Tag is string t && !string.IsNullOrEmpty(t))
+                try { Clipboard.SetText(t); } catch { }
+        }
+
+        private Button HeaderBtn(string text, Point loc)
+        {
+            var b = new Button
             {
                 Text      = text,
                 Font      = new Font("Segoe UI", 8f, FontStyle.Bold),
-                ForeColor = LabelColor,
+                ForeColor = LabelFg,
                 BackColor = Color.Transparent,
-                Location  = location,
+                Location  = loc,
                 Size      = new Size(24, 24),
                 FlatStyle = FlatStyle.Flat,
                 Cursor    = Cursors.Hand
             };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.MouseEnter += (_, _) => btn.ForeColor = Color.White;
-            btn.MouseLeave += (_, _) => btn.ForeColor = LabelColor;
-            return btn;
+            b.FlatAppearance.BorderSize = 0;
+            b.MouseEnter += (_, _) => b.ForeColor = Color.White;
+            b.MouseLeave += (_, _) => b.ForeColor = LabelFg;
+            return b;
         }
 
-        private Button MakeButton(string text, Point location, Size size)
+        private Button Btn(string text, Point loc, Size size)
         {
-            var btn = new Button
+            var b = new Button
             {
                 Text      = text,
-                Font      = _btnFont,
+                Font      = _btn,
                 ForeColor = Color.White,
-                BackColor = CopyBtnColor,
-                Location  = location,
+                BackColor = BtnBg,
+                Location  = loc,
                 Size      = size,
                 FlatStyle = FlatStyle.Flat,
                 Cursor    = Cursors.Hand,
                 UseVisualStyleBackColor = false
             };
-            btn.FlatAppearance.BorderColor = CopyBtnColor;
-            btn.FlatAppearance.BorderSize  = 1;
-            btn.MouseEnter += (_, _) =>
-            {
-                if (!btn.Enabled) return;
-                btn.BackColor = CopyBtnHover;
-                btn.FlatAppearance.BorderColor = CopyBtnHover;
-            };
-            btn.MouseLeave += (_, _) =>
-            {
-                btn.BackColor = CopyBtnColor;
-                btn.FlatAppearance.BorderColor = CopyBtnColor;
-            };
-            return btn;
+            b.FlatAppearance.BorderColor = BtnBg;
+            b.FlatAppearance.BorderSize  = 1;
+            b.MouseEnter += (_, _) => { if (!b.Enabled) return; b.BackColor = BtnHover; b.FlatAppearance.BorderColor = BtnHover; };
+            b.MouseLeave += (_, _) => { b.BackColor = BtnBg; b.FlatAppearance.BorderColor = BtnBg; };
+            return b;
         }
 
-        private void MakeDraggable(Control ctrl)
+        private void MakeDraggable(Control c)
         {
-            ctrl.MouseDown += (_, e) =>
-            {
-                if (e.Button == MouseButtons.Left) { _dragging = true; _dragStart = e.Location; }
-            };
-            ctrl.MouseMove += (_, e) =>
-            {
-                if (!_dragging) return;
-                var c = Cursor.Position;
-                Location = new Point(c.X - _dragStart.X, c.Y - _dragStart.Y);
-            };
-            ctrl.MouseUp += (_, _) => _dragging = false;
+            c.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left) { _dragging = true; _dragPt = e.Location; } };
+            c.MouseMove += (_, e) => { if (!_dragging) return; var p = Cursor.Position; Location = new Point(p.X - _dragPt.X, p.Y - _dragPt.Y); };
+            c.MouseUp   += (_, _) => _dragging = false;
         }
 
         internal static Icon? LoadAppIcon()
         {
             try
             {
-                string path = Path.Combine(AppContext.BaseDirectory, "Resources", "iDeviceInfo.ico");
-                if (File.Exists(path)) return new Icon(path);
+                var p = Path.Combine(AppContext.BaseDirectory, "Resources", "iDeviceInfo.ico");
+                if (File.Exists(p)) return new Icon(p);
             }
             catch { }
             return null;
@@ -455,8 +611,8 @@ namespace iDeviceInfo.Forms
         {
             if (disposing)
             {
-                _titleFont.Dispose(); _subFont.Dispose();
-                _labelFont.Dispose(); _valueFont.Dispose(); _btnFont.Dispose();
+                _title.Dispose(); _sub.Dispose(); _lbl.Dispose(); _val.Dispose();
+                _btn.Dispose(); _sideName.Dispose(); _sideMod.Dispose(); _sideCap.Dispose();
             }
             base.Dispose(disposing);
         }
