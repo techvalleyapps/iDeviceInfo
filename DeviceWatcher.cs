@@ -82,10 +82,11 @@ namespace iDeviceInfo
         private readonly Dictionary<string, DeviceInfo> _connected      = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<IntPtr, string>     _handleToSerial = new();
 
-        // ── Pairing synchronisation ───────────────────────────────────────
+        // ── Trust-watcher cancellation (one per untrusted device) ────────
+        private readonly Dictionary<IntPtr, CancellationTokenSource> _trustWatchers = new();
 
-        // Starts in the "set" (complete) state so MSG_PAIRED never waits
-        // unless a pairing thread is actually running.
+        // Blocks the trust-watcher poll loop while AMDevicePair is running
+        // so we don't try to connect while the pairing thread owns the handle.
         private readonly ManualResetEventSlim _pairingComplete = new(true);
 
         // ── Diagnostics ───────────────────────────────────────────────────
@@ -210,7 +211,7 @@ namespace iDeviceInfo
 
             if (msg == AMD.MSG_CONNECTED)
             {
-                // Quick trust check — no session, just validate pairing
+                // Quick trust check
                 bool trusted = false;
                 try
                 {
@@ -222,7 +223,6 @@ namespace iDeviceInfo
 
                 if (trusted)
                 {
-                    // Already trusted — read everything now on the AMD thread
                     DeviceInfo? di = ReadAllDeviceFields(device);
                     if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
                     _uiCtx!.Post(_ =>
@@ -234,44 +234,36 @@ namespace iDeviceInfo
                 }
                 else
                 {
-                    // Not trusted — initiate pairing on a dedicated thread.
-                    // We mark _pairingComplete as "in progress" NOW, before the
-                    // thread starts, so MSG_PAIRED always waits for it even if
-                    // the thread runs very quickly.
+                    // Not trusted yet.
+                    // 1. PairDevice thread — shows "Trust This Computer?" on the device.
+                    // 2. TrustWatcher thread — polls every second until trusted,
+                    //    then reads all fields.  This is how 3uTools works: it does
+                    //    not rely on MSG_PAIRED timing; it simply polls.
                     _pairingComplete.Reset();
                     var devHandle = device;
+
+                    var cts = new CancellationTokenSource();
+                    _trustWatchers[device] = cts;
+
                     new Thread(() =>
                     {
                         try   { PairDevice(devHandle); }
-                        finally { _pairingComplete.Set(); } // unblock MSG_PAIRED
+                        finally { _pairingComplete.Set(); }
                     })
                     { IsBackground = true, Name = "iDeviceInfo-Pair" }.Start();
+
+                    new Thread(() => TrustWatcher(devHandle, cts.Token))
+                    { IsBackground = true, Name = "iDeviceInfo-TrustWatcher" }.Start();
                 }
-            }
-            else if (msg == AMD.MSG_PAIRED)
-            {
-                // MSG_PAIRED fires INSIDE AMDevicePair before it returns, so the
-                // pairing thread still owns the device connection at this point.
-                // Wait for the thread to finish (AMDevicePair return + Disconnect)
-                // before we touch the handle.  Timeout 90 s covers the slowest user.
-                // When trust comes from 3uTools/Apple Devices the event is already
-                // set (no pairing thread running) so the wait returns immediately.
-                _pairingComplete.Wait(TimeSpan.FromSeconds(90));
-
-                // Small extra settle time for the lockdown daemon to be ready.
-                Thread.Sleep(500);
-
-                DeviceInfo? di = ReadAllDeviceFields(device);
-                if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
-                _uiCtx!.Post(_ =>
-                {
-                    _handleToSerial[device]     = di.SerialNumber;
-                    _connected[di.SerialNumber] = di;
-                    DeviceConnected?.Invoke(this, di);
-                }, null);
             }
             else if (msg == AMD.MSG_DISCONNECTED)
             {
+                // Stop trust watcher for this device if running
+                if (_trustWatchers.TryGetValue(device, out var cts))
+                {
+                    cts.Cancel();
+                    _trustWatchers.Remove(device);
+                }
                 _uiCtx!.Post(_ => HandleDisconnected(device), null);
             }
         }
@@ -301,24 +293,60 @@ namespace iDeviceInfo
         /// </summary>
         private static void PairDevice(IntPtr device)
         {
-            // Register a CF RunLoop for this thread before any AMD calls.
             try { CF.CFRunLoopGetCurrent(); } catch { }
-
             try
             {
                 AMD.AMDeviceConnect(device);
-
-                // AMDevicePair sends the pairing request to the device ("Trust This
-                // Computer?" appears on screen) then blocks on USBMUX socket recv
-                // until the user taps Trust or the call times out.
-                // When it returns the certificate is written to disk and MSG_PAIRED
-                // fires on the AMD thread so ReadAllDeviceFields runs there.
-                AMD.AMDevicePair(device);
+                AMD.AMDevicePair(device); // blocks until Trust tapped or timeout
             }
             catch { }
-            finally
+            finally { try { AMD.AMDeviceDisconnect(device); } catch { } }
+        }
+
+        /// <summary>
+        /// Polls AMDeviceValidatePairing every second until the device is trusted,
+        /// then reads all fields and fires DeviceConnected.  This mirrors how
+        /// 3uTools detects trust — it does not rely on MSG_PAIRED timing at all.
+        /// Cancelled when the device disconnects.
+        /// </summary>
+        private void TrustWatcher(IntPtr device, CancellationToken ct)
+        {
+            // Wait for PairDevice to finish before touching the handle.
+            // If 3uTools/Apple Devices does the trust, _pairingComplete is already
+            // set and this returns instantly.
+            try { _pairingComplete.Wait(ct); } catch (OperationCanceledException) { return; }
+
+            // Poll until trusted, disconnected, or disposed
+            while (!ct.IsCancellationRequested && !_disposed)
             {
-                try { AMD.AMDeviceDisconnect(device); } catch { }
+                Thread.Sleep(1000);
+                if (ct.IsCancellationRequested || _disposed) return;
+
+                try
+                {
+                    if (AMD.AMDeviceConnect(device) != 0) continue;
+
+                    bool trusted = AMD.AMDeviceValidatePairing(device) == 0;
+                    AMD.AMDeviceDisconnect(device);
+                    if (!trusted) continue;
+
+                    // Trusted — read all fields now
+                    DeviceInfo? di = ReadAllDeviceFields(device);
+                    if (di == null || string.IsNullOrEmpty(di.SerialNumber)) continue;
+
+                    _uiCtx!.Post(_ =>
+                    {
+                        // Remove the watcher entry since we're done
+                        _trustWatchers.Remove(device);
+
+                        _handleToSerial[device]     = di.SerialNumber;
+                        _connected[di.SerialNumber] = di;
+                        DeviceConnected?.Invoke(this, di);
+                    }, null);
+
+                    return; // done
+                }
+                catch { }
             }
         }
 
