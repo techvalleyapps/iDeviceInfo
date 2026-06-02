@@ -58,14 +58,21 @@ namespace iDeviceInfo
         // ── Helpers ───────────────────────────────────────────────────────
 
         /// <summary>
-        /// Full model string: "iPhone 12 Pro Max 128GB".
+        /// Full model string: "iPad Pro 10.5-inch Wi-Fi 256GB".
         /// Falls back gracefully when storage is not available.
+        /// Appends Wi-Fi / Wi-Fi + Cellular suffix for iPads.
         /// </summary>
         public string FullModelName
         {
             get
             {
                 string model = string.IsNullOrEmpty(ModelName) ? ProductType : ModelName;
+                bool isIpad = ProductType.StartsWith("iPad", StringComparison.OrdinalIgnoreCase);
+                if (isIpad)
+                {
+                    bool hasCellular = !string.IsNullOrEmpty(IMEI) && IMEI != "N/A";
+                    model += hasCellular ? " Wi-Fi + Cellular" : " Wi-Fi";
+                }
                 if (StorageGB > 0) model += " " + (StorageGB >= 1024 ? "1TB" : StorageGB + "GB");
                 return model;
             }
