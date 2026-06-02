@@ -627,6 +627,11 @@ namespace iDeviceInfo
             // ── iPad 6th gen (2018) ───────────────────────────────────────
             ["iPad7,5"]    = "iPad (6th generation)",
             ["iPad7,6"]    = "iPad (6th generation)",
+            // ── iPad Pro 10.5-inch / 12.9-inch 2nd gen (2017) ────────────
+            ["iPad7,3"]    = "iPad Pro 10.5-inch",
+            ["iPad7,4"]    = "iPad Pro 10.5-inch",
+            ["iPad7,1"]    = "iPad Pro 12.9-inch (2nd generation)",
+            ["iPad7,2"]    = "iPad Pro 12.9-inch (2nd generation)",
             // ── iPod touch 7th gen (2019) ─────────────────────────────────
             ["iPod9,1"]    = "iPod touch (7th generation)",
         };
