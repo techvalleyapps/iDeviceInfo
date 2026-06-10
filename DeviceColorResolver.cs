@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Reflection;
 using System.Text.Json;
 
@@ -41,6 +42,7 @@ namespace iDeviceInfo
             string productType, string? deviceColor, string? enclosureColor)
         {
             ColorMap.TryGetValue(productType ?? "", out List<ColorEntry>? candidates);
+            int dcCode = -1, ecCode = -1;
 
             // Prefer the enclosure (back/housing) color — that's the color the
             // device is marketed/sold as. DeviceColor is only the front glass.
@@ -61,6 +63,8 @@ namespace iDeviceInfo
                 // 2) Integer enum (iPhone 7 and newer DeviceEnclosureColor)
                 if (int.TryParse(v, out int code))
                 {
+                    if (ReferenceEquals(raw, enclosureColor)) ecCode = code; else dcCode = code;
+
                     string? name = MapEnclosureEnum(productType ?? "", code);
                     if (name == null && candidates is { Count: 1 })
                         name = candidates[0].Name;          // only one color exists
@@ -77,7 +81,104 @@ namespace iDeviceInfo
                 return (TitleCase(v), null);
             }
 
+            // 4) Unmapped integer code (iPhone 11 / modern iPads) — identify the
+            //    color by downloading Apple's own Find My device image for this
+            //    exact ProductType+color-code combination and matching its body
+            //    color against the known palette.
+            if (ecCode >= 0)
+                return ProbeAppleImage(productType ?? "", dcCode < 0 ? ecCode : dcCode, ecCode, candidates);
+
             return (null, null);
+        }
+
+        // ── Apple Find-My image probe ─────────────────────────────────────
+        //
+        // Apple hosts renderings of every device in every color, addressed by the
+        // SAME numeric codes lockdownd returns:
+        //   statici.icloud.com/fmipmobile/deviceImages-9.0/iPhone/iPhone12,1-{dc}-{ec}-0/online-infobox__3x.png
+        // We download the image once, sample the body pixels (ignoring the screen
+        // area and transparency) and pick the nearest palette color.
+
+        private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(6) };
+        private static readonly Dictionary<string, (string? Name, string? Hex)> _probeCache = new();
+        private static readonly object _probeLock = new();
+
+        private static (string? Name, string? Hex) ProbeAppleImage(
+            string productType, int dc, int ec, List<ColorEntry>? candidates)
+        {
+            if (string.IsNullOrEmpty(productType) || candidates == null || candidates.Count == 0)
+                return (null, null);
+
+            string cacheKey = $"{productType}-{dc}-{ec}";
+            lock (_probeLock)
+                if (_probeCache.TryGetValue(cacheKey, out var cached)) return cached;
+
+            (string? Name, string? Hex) result = (null, null);
+            try
+            {
+                string family = productType.StartsWith("iPad", StringComparison.OrdinalIgnoreCase)
+                                ? "iPad" : "iPhone";
+                string url = $"https://statici.icloud.com/fmipmobile/deviceImages-9.0/" +
+                             $"{family}/{productType}-{dc}-{ec}-0/online-infobox__3x.png";
+
+                byte[] png = _http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+                using var ms  = new MemoryStream(png);
+                using var bmp = new Bitmap(ms);
+
+                var best = MatchBodyColor(bmp, candidates);
+                if (best != null) result = (best.Name, best.Hex);
+            }
+            catch { /* offline / 404 for brand-new device — just stay unknown */ }
+
+            lock (_probeLock) _probeCache[cacheKey] = result;
+            return result;
+        }
+
+        /// <summary>
+        /// Votes each opaque body pixel for its nearest palette color and returns
+        /// the winner. The central region (the screen) is excluded so an all-black
+        /// display doesn't outvote the housing color.
+        /// </summary>
+        private static ColorEntry? MatchBodyColor(Bitmap bmp, List<ColorEntry> candidates)
+        {
+            var palette = candidates.Where(c => !string.IsNullOrEmpty(c.Hex))
+                                    .Select(c => (entry: c, rgb: SplitRgb(c.Hex!.TrimStart('#'))))
+                                    .ToList();
+            if (palette.Count == 0) return null;
+
+            int w = bmp.Width, h = bmp.Height;
+            int sx0 = (int)(w * 0.28), sx1 = (int)(w * 0.72);   // screen exclusion zone
+            int sy0 = (int)(h * 0.12), sy1 = (int)(h * 0.85);
+
+            var votes = new int[palette.Count];
+            for (int y = 0; y < h; y += 2)
+            for (int x = 0; x < w; x += 2)
+            {
+                if (x > sx0 && x < sx1 && y > sy0 && y < sy1) continue; // skip screen
+                Color px = bmp.GetPixel(x, y);
+                if (px.A < 220) continue;                              // skip background
+
+                int bestIdx = -1; double bestDist = double.MaxValue;
+                for (int i = 0; i < palette.Count; i++)
+                {
+                    var (_, rgb) = palette[i];
+                    double d = Math.Pow(px.R - rgb.r, 2)
+                             + Math.Pow(px.G - rgb.g, 2)
+                             + Math.Pow(px.B - rgb.b, 2);
+                    if (d < bestDist) { bestDist = d; bestIdx = i; }
+                }
+                // Only count pixels reasonably close to SOME palette color, so
+                // shadows / highlights / camera lenses don't pollute the vote.
+                if (bestIdx >= 0 && bestDist <= 3 * 90 * 90) votes[bestIdx]++;
+            }
+
+            int winner = -1, max = 0, total = votes.Sum();
+            for (int i = 0; i < votes.Length; i++)
+                if (votes[i] > max) { max = votes[i]; winner = i; }
+
+            // Demand a meaningful margin: winner must hold >45% of all valid votes.
+            return winner >= 0 && total > 50 && max > total * 0.45
+                   ? palette[winner].entry : null;
         }
 
         // ── Matching helpers ──────────────────────────────────────────────
