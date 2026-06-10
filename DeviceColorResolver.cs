@@ -278,23 +278,18 @@ namespace iDeviceInfo
         public static string LastProbeDebug { get; private set; } = "(no probe yet)";
 
         /// <summary>
-        /// Identifies the housing color by sampling only the thin rim of the
-        /// device silhouette (just inside the outline). The screen — which is
-        /// most of a modern device's front — and the image background are never
-        /// sampled, so they can't skew the result. Shading on the rendered rim
-        /// is tolerated by comparing chroma (hue) more strongly than brightness.
+        /// Median color of the device's housing rim. Samples only the thin band
+        /// just inside the silhouette outline — never the screen (most of a
+        /// modern device's front, always dark) and never the image background.
+        /// Returns null when too few rim pixels were found to be reliable.
         /// </summary>
-        private static ColorEntry? MatchBodyColor(Bitmap bmp, List<ColorEntry> candidates)
+        private static (double R, double G, double B)? MedianRimColor(Bitmap bmp)
         {
-            var palette = candidates.Where(c => !string.IsNullOrEmpty(c.Hex))
-                                    .Select(c => (entry: c, rgb: SplitRgb(c.Hex!.TrimStart('#'))))
-                                    .ToList();
-            if (palette.Count == 0) return null;
-
             int w = bmp.Width, h = bmp.Height;
+            if (w < 20 || h < 20) return null;
 
-            // Background = average of the four 3x3 corner patches. The probe must
-            // work whether the PNG background is transparent OR a solid color.
+            // Background = average of the four 3x3 corner patches. Works whether
+            // the PNG background is transparent OR a solid color.
             (double r, double g, double b, double a) bg = (0, 0, 0, 0);
             int n = 0;
             foreach ((int cx, int cy) in new[] { (1, 1), (w - 2, 1), (1, h - 2), (w - 2, h - 2) })
@@ -316,8 +311,7 @@ namespace iDeviceInfo
 
             // Walk each row inward from both sides; the first non-background run
             // is the device outline — sample a few pixels just inside it.
-            var votes = new int[palette.Count];
-            int samples = 0;
+            var rs = new List<byte>(); var gs = new List<byte>(); var bs = new List<byte>();
             int yStart = (int)(h * 0.18), yEnd = (int)(h * 0.82); // avoid rounded corners
             const int skipEdge = 2, rimWidth = 6;
 
@@ -340,47 +334,15 @@ namespace iDeviceInfo
                         if (sx < 0 || sx >= w) break;
                         Color px = bmp.GetPixel(sx, y);
                         if (IsBackground(px)) break;
-
-                        int best = -1; double bestD = double.MaxValue;
-                        for (int i = 0; i < palette.Count; i++)
-                        {
-                            double d = ChromaDistance(px, palette[i].rgb);
-                            if (d < bestD) { bestD = d; best = i; }
-                        }
-                        if (best >= 0) { votes[best]++; samples++; }
+                        rs.Add(px.R); gs.Add(px.G); bs.Add(px.B);
                     }
                 }
             }
 
-            int winner = -1, max = 0;
-            for (int i = 0; i < votes.Length; i++)
-                if (votes[i] > max) { max = votes[i]; winner = i; }
+            if (rs.Count < 60) return null;                       // not enough rim
 
-            LastProbeDebug =
-                $"samples={samples}, votes=[{string.Join(", ", palette.Select((p, i) => $"{p.entry.Name}:{votes[i]}"))}]";
-
-            // Require enough rim pixels and a >40% winner share.
-            return winner >= 0 && samples > 60 && max > samples * 0.40
-                   ? palette[winner].entry : null;
-        }
-
-        /// <summary>
-        /// Distance that prioritizes hue/chroma over brightness, so a shaded or
-        /// highlighted rendering of "Blue" still lands on Blue rather than Black.
-        /// </summary>
-        private static double ChromaDistance(Color px, (int r, int g, int b) pal)
-        {
-            double lp = 0.299 * px.R + 0.587 * px.G + 0.114 * px.B;
-            double lc = 0.299 * pal.r + 0.587 * pal.g + 0.114 * pal.b;
-
-            // chroma = color with luminance removed
-            double crP = px.R - lp, cgP = px.G - lp, cbP = px.B - lp;
-            double crC = pal.r - lc, cgC = pal.g - lc, cbC = pal.b - lc;
-
-            double chroma = Math.Pow(crP - crC, 2) + Math.Pow(cgP - cgC, 2) + Math.Pow(cbP - cbC, 2);
-            double luma   = Math.Pow(lp - lc, 2);
-
-            return chroma * 4.0 + luma * 0.6;
+            static double Median(List<byte> v) { v.Sort(); return v[v.Count / 2]; }
+            return (Median(rs), Median(gs), Median(bs));
         }
 
         // ── Matching helpers ──────────────────────────────────────────────
