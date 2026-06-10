@@ -23,8 +23,9 @@ namespace iDeviceInfo
     {
         public record ColorEntry(string Name, string? Hex);
 
-        private static readonly Lazy<Dictionary<string, List<ColorEntry>>> _colors  = new(LoadColors);
-        private static readonly Lazy<Dictionary<string, string>>           _names   = new(LoadNames);
+        private static readonly Lazy<Dictionary<string, List<ColorEntry>>>        _colors   = new(LoadColors);
+        private static readonly Lazy<Dictionary<string, string>>                  _names    = new(LoadNames);
+        private static readonly Lazy<Dictionary<string, Dictionary<int, string>>> _encCodes = new(LoadEnclosureCodes);
 
         private static Dictionary<string, List<ColorEntry>> ColorMap => _colors.Value;
 
@@ -65,7 +66,14 @@ namespace iDeviceInfo
                 {
                     if (ReferenceEquals(raw, enclosureColor)) ecCode = code; else dcCode = code;
 
-                    string? name = MapEnclosureEnum(productType ?? "", code);
+                    // Confirmed mappings from apple_device_colors.json win — they
+                    // come from real devices and can be extended without recompiling.
+                    string? name = null;
+                    if (_encCodes.Value.TryGetValue(productType ?? "", out var jsonMap) &&
+                        jsonMap.TryGetValue(code, out string? jsonName))
+                        name = jsonName;
+
+                    name ??= MapEnclosureEnum(productType ?? "", code);
                     if (name == null && candidates is { Count: 1 })
                         name = candidates[0].Name;          // only one color exists
                     if (name != null)
@@ -116,22 +124,154 @@ namespace iDeviceInfo
             (string? Name, string? Hex) result = (null, null);
             try
             {
+                var palette = candidates.Where(c => !string.IsNullOrEmpty(c.Hex))
+                                        .Select(c => (entry: c, rgb: SplitRgb(c.Hex!.TrimStart('#'))))
+                                        .ToList();
+                if (palette.Count == 0) { lock (_probeLock) _probeCache[cacheKey] = result; return result; }
+
                 string family = productType.StartsWith("iPad", StringComparison.OrdinalIgnoreCase)
                                 ? "iPad" : "iPhone";
-                string url = $"https://statici.icloud.com/fmipmobile/deviceImages-9.0/" +
-                             $"{family}/{productType}-{dc}-{ec}-0/online-infobox__3x.png";
 
-                byte[] png = _http.GetByteArrayAsync(url).GetAwaiter().GetResult();
-                using var ms  = new MemoryStream(png);
-                using var bmp = new Bitmap(ms);
+                // Download Apple's rendering for EVERY enclosure code of this model,
+                // not just ours. All renders share the same lighting, so comparing
+                // the codes against EACH OTHER cancels the heavy shading that makes
+                // absolute color matching fail (e.g. Natural Titanium rendering as
+                // dark blue-gray).
+                var feats = new SortedDictionary<int, (double R, double G, double B)>();
+                int misses = 0;
+                for (int code = 1; code <= 12 && misses < 4; code++)
+                {
+                    var f = RimFeature(family, productType, dc, code)
+                            ?? (dc != code ? RimFeature(family, productType, code, code) : null);
+                    if (f == null) { misses++; continue; }
+                    feats[code] = f.Value;
+                }
+                if (!feats.ContainsKey(ec))
+                {
+                    var f = RimFeature(family, productType, dc, ec);
+                    if (f != null) feats[ec] = f.Value;
+                }
 
-                var best = MatchBodyColor(bmp, candidates);
-                if (best != null) result = (best.Name, best.Hex);
+                string dbg = string.Join(" ",
+                    feats.Select(kv => $"{kv.Key}=({kv.Value.R:F0},{kv.Value.G:F0},{kv.Value.B:F0})"));
+
+                if (feats.ContainsKey(ec) && feats.Count >= 2)
+                {
+                    var entry = AssignCodes(feats, palette, ec);
+                    if (entry != null) result = (entry.Name, entry.Hex);
+                    LastProbeDebug = $"{cacheKey}: imgs[{dbg}] -> {entry?.Name ?? "(no confident match)"}";
+                }
+                else
+                {
+                    LastProbeDebug = $"{cacheKey}: not enough images, have [{dbg}] — cannot label";
+                }
             }
-            catch { /* offline / 404 for brand-new device — just stay unknown */ }
+            catch (Exception ex)
+            {
+                // offline / 404 for brand-new device — just stay unknown
+                LastProbeDebug = $"{cacheKey}: probe failed ({ex.Message})";
+            }
 
             lock (_probeLock) _probeCache[cacheKey] = result;
             return result;
+        }
+
+        /// <summary>Downloads one render and returns its median rim color (cached).</summary>
+        private static readonly Dictionary<string, (double R, double G, double B)?> _featCache = new();
+
+        private static (double R, double G, double B)? RimFeature(
+            string family, string productType, int dc, int ec)
+        {
+            string key = $"{productType}-{dc}-{ec}";
+            lock (_probeLock)
+                if (_featCache.TryGetValue(key, out var c)) return c;
+
+            (double R, double G, double B)? feat = null;
+            try
+            {
+                string url = $"https://statici.icloud.com/fmipmobile/deviceImages-9.0/" +
+                             $"{family}/{productType}-{dc}-{ec}-0/online-infobox__3x.png";
+                byte[] png = _http.GetByteArrayAsync(url).GetAwaiter().GetResult();
+                using var ms  = new MemoryStream(png);
+                using var bmp = new Bitmap(ms);
+                feat = MedianRimColor(bmp);
+            }
+            catch { /* 404 = code doesn't exist for this model */ }
+
+            lock (_probeLock) _featCache[key] = feat;
+            return feat;
+        }
+
+        /// <summary>
+        /// Maps enclosure codes to palette colors by z-score–normalizing both sets
+        /// (which removes the renderer's systematic darkening/tint) and finding the
+        /// best one-to-one assignment. Falls back to nearest-match when the number
+        /// of downloadable codes doesn't equal the palette size.
+        /// </summary>
+        private static ColorEntry? AssignCodes(
+            SortedDictionary<int, (double R, double G, double B)> feats,
+            List<(ColorEntry entry, (int r, int g, int b) rgb)> palette,
+            int ec)
+        {
+            int[] codes = feats.Keys.ToArray();
+            double[][] zImg = Normalize(codes.Select(c => new[]
+                { feats[c].R, feats[c].G, feats[c].B }).ToArray());
+            double[][] zPal = Normalize(palette.Select(p => new[]
+                { (double)p.rgb.r, p.rgb.g, p.rgb.b }).ToArray());
+
+            int ecIdx = Array.IndexOf(codes, ec);
+
+            if (codes.Length == palette.Count && palette.Count <= 7)
+            {
+                // Exhaustive best assignment (≤ 7! = 5040 permutations)
+                int[]? bestPerm = null; double bestCost = double.MaxValue;
+                Permute(Enumerable.Range(0, palette.Count).ToArray(), 0, perm =>
+                {
+                    double cost = 0;
+                    for (int i = 0; i < perm.Length; i++)
+                        cost += Dist2(zImg[i], zPal[perm[i]]);
+                    if (cost < bestCost) { bestCost = cost; bestPerm = (int[])perm.Clone(); }
+                });
+                if (bestPerm != null) return palette[bestPerm[ecIdx]].entry;
+            }
+
+            // Count mismatch — nearest palette color in normalized space.
+            int best = -1; double bestD = double.MaxValue;
+            for (int i = 0; i < zPal.Length; i++)
+            {
+                double d = Dist2(zImg[ecIdx], zPal[i]);
+                if (d < bestD) { bestD = d; best = i; }
+            }
+            return best >= 0 ? palette[best].entry : null;
+        }
+
+        private static double[][] Normalize(double[][] v)
+        {
+            var result = new double[v.Length][];
+            for (int i = 0; i < v.Length; i++) result[i] = new double[3];
+            for (int ch = 0; ch < 3; ch++)
+            {
+                double mean = v.Average(x => x[ch]);
+                double std  = Math.Sqrt(v.Average(x => Math.Pow(x[ch] - mean, 2)));
+                if (std < 5) std = 5;                       // avoid blowing up noise
+                for (int i = 0; i < v.Length; i++)
+                    result[i][ch] = (v[i][ch] - mean) / std;
+            }
+            return result;
+        }
+
+        private static double Dist2(double[] a, double[] b)
+            => Math.Pow(a[0] - b[0], 2) + Math.Pow(a[1] - b[1], 2) + Math.Pow(a[2] - b[2], 2);
+
+        private static void Permute(int[] arr, int k, Action<int[]> visit)
+        {
+            if (k == arr.Length) { visit(arr); return; }
+            for (int i = k; i < arr.Length; i++)
+            {
+                (arr[k], arr[i]) = (arr[i], arr[k]);
+                Permute(arr, k + 1, visit);
+                (arr[k], arr[i]) = (arr[i], arr[k]);
+            }
         }
 
         /// <summary>Diagnostics from the last image probe — shown in the debug dump.</summary>
@@ -309,6 +449,12 @@ namespace iDeviceInfo
                 "iPhone11,8" => new()
                 { [1] = "Black", [2] = "White", [6] = "(PRODUCT)RED", [7] = "Yellow", [8] = "Coral", [9] = "Blue" },
 
+                // Confirmed against physical devices (2026-06-10)
+                "iPhone13,3" or "iPhone13,4" => new()        // 12 Pro / 12 Pro Max
+                { [2] = "Silver" },
+                "iPhone16,1" or "iPhone16,2" => new()        // 15 Pro / 15 Pro Max
+                { [5] = "Natural Titanium" },
+
                 _ => null,
             };
 
@@ -364,6 +510,28 @@ namespace iDeviceInfo
                 }
             }
             catch { /* ignore malformed data */ }
+            return result;
+        }
+
+        private static Dictionary<string, Dictionary<int, string>> LoadEnclosureCodes()
+        {
+            var result = new Dictionary<string, Dictionary<int, string>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using JsonDocument? doc = OpenJson();
+                if (doc == null) return result;
+                if (!doc.RootElement.TryGetProperty("enclosureCodes", out JsonElement codes)) return result;
+
+                foreach (JsonProperty dev in codes.EnumerateObject())
+                {
+                    var map = new Dictionary<int, string>();
+                    foreach (JsonProperty kv in dev.Value.EnumerateObject())
+                        if (int.TryParse(kv.Name, out int code) && kv.Value.GetString() is { Length: > 0 } name)
+                            map[code] = name;
+                    if (map.Count > 0) result[dev.Name] = map;
+                }
+            }
+            catch { }
             return result;
         }
 

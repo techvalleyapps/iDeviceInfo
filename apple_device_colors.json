@@ -11,7 +11,8 @@
       "Read ProductType via lockdownd (ideviceinfo -k ProductType), then look it up here to get the possible colors for that device.",
       "DeviceColor/DeviceEnclosureColor from lockdownd is inconsistent: old devices return names ('black'), 2014-2017 devices return hex strings ('#e1e4e3'), iPhone XR and newer return a numeric enum ('1'). The numeric enum is model-specific and NOT mapped here.",
       "For exact color identification on newer devices, match the Apple model number (e.g. A3083, from ModelNumber + RegionInfo) against a per-color model list - every color/storage/region combo has its own part number.",
-      "To update for new devices: add a new entry under 'devices', or re-pull from https://api.appledb.dev/device/<ProductType>.json"
+      "To update for new devices: add a new entry under 'devices', or re-pull from https://api.appledb.dev/device/<ProductType>.json",
+      "enclosureCodes sources: 3uTools devices_table (authoritative, verified against two physical devices), FutureTap community spreadsheet, libimobiledevice #818."
     ],
     "device_count": 168
   },
@@ -4279,6 +4280,828 @@
           "hex": "#262326"
         }
       ]
+    }
+  },
+  "enclosureCodes": {
+    "Watch1,1": {
+      "2": "Black"
+    },
+    "Watch1,2": {
+      "2": "Black"
+    },
+    "Watch2,3": {
+      "2": "Black"
+    },
+    "Watch2,4": {
+      "2": "Black"
+    },
+    "Watch2,6": {
+      "2": "Black"
+    },
+    "Watch2,7": {
+      "2": "Black"
+    },
+    "Watch3,1": {
+      "2": "Black"
+    },
+    "Watch3,2": {
+      "2": "Black"
+    },
+    "Watch3,3": {
+      "2": "Black"
+    },
+    "Watch3,4": {
+      "2": "Black"
+    },
+    "Watch4,1": {
+      "2": "Black"
+    },
+    "Watch4,2": {
+      "2": "Black"
+    },
+    "Watch4,3": {
+      "2": "Black"
+    },
+    "Watch4,4": {
+      "2": "Black"
+    },
+    "Watch5,1": {
+      "2": "Black"
+    },
+    "Watch5,10": {
+      "2": "Black"
+    },
+    "Watch5,11": {
+      "2": "Black"
+    },
+    "Watch5,12": {
+      "2": "Black"
+    },
+    "Watch5,2": {
+      "2": "Black"
+    },
+    "Watch5,3": {
+      "2": "Black"
+    },
+    "Watch5,4": {
+      "2": "Black"
+    },
+    "Watch5,9": {
+      "2": "Black"
+    },
+    "Watch6,1": {
+      "2": "Black"
+    },
+    "Watch6,10": {
+      "2": "Black"
+    },
+    "Watch6,11": {
+      "2": "Black"
+    },
+    "Watch6,12": {
+      "2": "Black"
+    },
+    "Watch6,13": {
+      "2": "Black"
+    },
+    "Watch6,14": {
+      "2": "Black"
+    },
+    "Watch6,15": {
+      "2": "Black"
+    },
+    "Watch6,16": {
+      "2": "Black"
+    },
+    "Watch6,17": {
+      "2": "Black"
+    },
+    "Watch6,18": {
+      "2": "Black"
+    },
+    "Watch6,2": {
+      "2": "Black"
+    },
+    "Watch6,3": {
+      "2": "Black"
+    },
+    "Watch6,4": {
+      "2": "Black"
+    },
+    "Watch6,6": {
+      "2": "Black"
+    },
+    "Watch6,7": {
+      "2": "Black"
+    },
+    "Watch6,8": {
+      "2": "Black"
+    },
+    "Watch6,9": {
+      "2": "Black"
+    },
+    "Watch7,1": {
+      "2": "Black"
+    },
+    "Watch7,2": {
+      "2": "Black"
+    },
+    "Watch7,3": {
+      "2": "Black"
+    },
+    "Watch7,4": {
+      "2": "Black"
+    },
+    "Watch7,5": {
+      "2": "Black"
+    },
+    "iPad11,1": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad11,2": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad11,3": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad11,4": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad11,6": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad11,7": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad12,1": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad12,2": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad13,1": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "18": "Green",
+      "3": "Rose Gold",
+      "4": "Sky Blue"
+    },
+    "iPad13,10": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,11": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,16": {
+      "1": "Slate",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple",
+      "3": "Pink"
+    },
+    "iPad13,17": {
+      "1": "Slate",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple",
+      "3": "Pink"
+    },
+    "iPad13,18": {
+      "3": "Yellow",
+      "4": "Pink",
+      "1": "Silver",
+      "2": "Blue"
+    },
+    "iPad13,19": {
+      "3": "Yellow",
+      "4": "Pink",
+      "1": "Silver",
+      "2": "Blue"
+    },
+    "iPad13,2": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "18": "Green",
+      "3": "Rose Gold",
+      "4": "Sky Blue"
+    },
+    "iPad13,4": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,5": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,6": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,7": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,8": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad13,9": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad14,1": {
+      "3": "Pink",
+      "1": "Space Gray",
+      "6": "Starlight",
+      "7": "Purple",
+      "4": "Blue"
+    },
+    "iPad14,10": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad14,11": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad14,2": {
+      "3": "Pink",
+      "1": "Space Gray",
+      "6": "Starlight",
+      "7": "Purple",
+      "4": "Blue"
+    },
+    "iPad14,3": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad14,4": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad14,5": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad14,6": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad14,8": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad14,9": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad15,3": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad15,4": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad15,5": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad15,6": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad15,7": {
+      "8": "Yellow",
+      "3": "Pink",
+      "2": "Silver",
+      "4": "Blue"
+    },
+    "iPad15,8": {
+      "8": "Yellow",
+      "3": "Pink",
+      "2": "Silver",
+      "4": "Blue"
+    },
+    "iPad16,1": {
+      "3": "Pink",
+      "1": "Space Gray",
+      "6": "Starlight",
+      "7": "Purple",
+      "4": "Blue"
+    },
+    "iPad16,10": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad16,11": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad16,2": {
+      "3": "Pink",
+      "1": "Space Gray",
+      "6": "Starlight",
+      "7": "Purple",
+      "4": "Blue"
+    },
+    "iPad16,3": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad16,4": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad16,5": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad16,6": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad16,8": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad16,9": {
+      "1": "Space Gray",
+      "4": "Blue",
+      "6": "Starlight",
+      "7": "Purple"
+    },
+    "iPad17,1": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad17,2": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad17,3": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad17,4": {
+      "1": "Space Black",
+      "2": "Silver"
+    },
+    "iPad6,11": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad6,12": {
+      "3": "Gold",
+      "2": "Silver",
+      "1": "Space Gray"
+    },
+    "iPad7,1": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad7,11": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad7,12": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad7,2": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad7,3": {
+      "4": "Rose Gold",
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad7,4": {
+      "4": "Rose Gold",
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad7,5": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad7,6": {
+      "1": "Space Gray",
+      "3": "Gold",
+      "2": "Silver"
+    },
+    "iPad8,1": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,10": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,11": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,12": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,2": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,3": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,4": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,5": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,6": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,7": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,8": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPad8,9": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPhone10,1": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Gold",
+      "6": "(PRODUCT)RED",
+      "8": "Space Gray",
+      "7": "Gold"
+    },
+    "iPhone10,2": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Gold",
+      "6": "(PRODUCT)RED",
+      "8": "Space Gray",
+      "7": "Gold"
+    },
+    "iPhone10,3": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPhone10,4": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Gold",
+      "6": "(PRODUCT)RED",
+      "8": "Space Gray",
+      "7": "Gold"
+    },
+    "iPhone10,5": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Gold",
+      "6": "(PRODUCT)RED",
+      "8": "Space Gray",
+      "7": "Gold"
+    },
+    "iPhone10,6": {
+      "1": "Space Gray",
+      "2": "Silver"
+    },
+    "iPhone11,2": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Silver",
+      "4": "Gold",
+      "26": "Space Gray"
+    },
+    "iPhone11,4": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Silver",
+      "4": "Gold",
+      "26": "Space Gray"
+    },
+    "iPhone11,6": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "3": "Silver",
+      "4": "Gold",
+      "26": "Space Gray"
+    },
+    "iPhone11,8": {
+      "1": "Black",
+      "2": "White",
+      "6": "(PRODUCT)RED",
+      "7": "Yellow",
+      "8": "Coral",
+      "9": "Blue"
+    },
+    "iPhone12,1": {
+      "1": "Black",
+      "2": "White",
+      "6": "(PRODUCT)RED",
+      "7": "Yellow",
+      "17": "Purple",
+      "18": "Green"
+    },
+    "iPhone12,3": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "4": "Gold",
+      "18": "Midnight Green"
+    },
+    "iPhone12,5": {
+      "1": "Space Gray",
+      "2": "Silver",
+      "4": "Gold",
+      "18": "Midnight Green"
+    },
+    "iPhone12,8": {
+      "1": "Black",
+      "2": "White",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone13,1": {
+      "2": "White",
+      "1": "Black",
+      "9": "Blue",
+      "18": "Green",
+      "17": "Purple",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone13,2": {
+      "2": "White",
+      "1": "Black",
+      "9": "Blue",
+      "18": "Green",
+      "17": "Purple",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone13,3": {
+      "2": "Silver",
+      "3": "Gold",
+      "9": "Pacific Blue",
+      "1": "Graphite"
+    },
+    "iPhone13,4": {
+      "2": "Silver",
+      "3": "Gold",
+      "9": "Pacific Blue",
+      "1": "Graphite"
+    },
+    "iPhone14,2": {
+      "2": "Silver",
+      "3": "Gold",
+      "9": "Sierra Blue",
+      "1": "Graphite",
+      "18": "Alpine Green"
+    },
+    "iPhone14,3": {
+      "2": "Silver",
+      "3": "Gold",
+      "9": "Sierra Blue",
+      "1": "Graphite",
+      "18": "Alpine Green"
+    },
+    "iPhone14,4": {
+      "2": "Starlight",
+      "1": "Midnight",
+      "9": "Blue",
+      "4": "Pink",
+      "6": "(PRODUCT)RED",
+      "18": "Green"
+    },
+    "iPhone14,5": {
+      "2": "Starlight",
+      "1": "Midnight",
+      "9": "Blue",
+      "4": "Pink",
+      "6": "(PRODUCT)RED",
+      "18": "Green"
+    },
+    "iPhone14,6": {
+      "1": "Midnight",
+      "2": "Starlight",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone14,7": {
+      "2": "Starlight",
+      "1": "Midnight",
+      "9": "Blue",
+      "6": "(PRODUCT)RED",
+      "17": "Purple",
+      "7": "Yellow"
+    },
+    "iPhone14,8": {
+      "2": "Starlight",
+      "1": "Midnight",
+      "9": "Blue",
+      "6": "(PRODUCT)RED",
+      "17": "Purple",
+      "7": "Yellow"
+    },
+    "iPhone15,2": {
+      "2": "Silver",
+      "1": "Space Black",
+      "3": "Gold",
+      "17": "Deep Purple"
+    },
+    "iPhone15,3": {
+      "2": "Silver",
+      "1": "Space Black",
+      "3": "Gold",
+      "17": "Deep Purple"
+    },
+    "iPhone15,4": {
+      "1": "Black",
+      "9": "Blue",
+      "4": "Pink",
+      "7": "Yellow",
+      "18": "Green"
+    },
+    "iPhone15,5": {
+      "1": "Black",
+      "9": "Blue",
+      "4": "Pink",
+      "7": "Yellow",
+      "18": "Green"
+    },
+    "iPhone16,1": {
+      "5": "Natural Titanium",
+      "9": "Blue Titanium",
+      "2": "White Titanium",
+      "1": "Black Titanium"
+    },
+    "iPhone16,2": {
+      "5": "Natural Titanium",
+      "9": "Blue Titanium",
+      "2": "White Titanium",
+      "1": "Black Titanium"
+    },
+    "iPhone17,1": {
+      "5": "Natural Titanium",
+      "4": "Desert Titanium",
+      "2": "White Titanium",
+      "1": "Black Titanium"
+    },
+    "iPhone17,2": {
+      "5": "Natural Titanium",
+      "4": "Desert Titanium",
+      "2": "White Titanium",
+      "1": "Black Titanium"
+    },
+    "iPhone17,3": {
+      "4": "Pink",
+      "18": "Teal",
+      "9": "Ultramarine",
+      "2": "White",
+      "1": "Black"
+    },
+    "iPhone17,4": {
+      "4": "Pink",
+      "18": "Teal",
+      "9": "Ultramarine",
+      "2": "White",
+      "1": "Black"
+    },
+    "iPhone17,5": {
+      "2": "White",
+      "1": "Black",
+      "4": "Soft Pink"
+    },
+    "iPhone18,1": {
+      "2": "Silver",
+      "8": "Cosmic Orange",
+      "9": "Deep Blue"
+    },
+    "iPhone18,2": {
+      "2": "Silver",
+      "8": "Cosmic Orange",
+      "9": "Deep Blue"
+    },
+    "iPhone18,3": {
+      "2": "White",
+      "1": "Black",
+      "9": "Mist Blue",
+      "18": "Sage",
+      "17": "Lavender"
+    },
+    "iPhone18,4": {
+      "2": "Cloud White",
+      "1": "Space Black",
+      "9": "Sky Blue",
+      "3": "Light Gold"
+    },
+    "iPhone18,5": {
+      "2": "White",
+      "1": "Black",
+      "4": "Soft Pink"
+    },
+    "iPhone8,1": {
+      "4": "Rose Gold",
+      "1": "Space Gray"
+    },
+    "iPhone8,2": {
+      "4": "Rose Gold",
+      "1": "Space Gray"
+    },
+    "iPhone9,1": {
+      "1": "Black",
+      "2": "Silver",
+      "3": "Gold",
+      "4": "Rose Gold",
+      "5": "Jet Black",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone9,2": {
+      "1": "Black",
+      "2": "Silver",
+      "3": "Gold",
+      "4": "Rose Gold",
+      "5": "Jet Black",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone9,3": {
+      "1": "Black",
+      "2": "Silver",
+      "3": "Gold",
+      "4": "Rose Gold",
+      "5": "Jet Black",
+      "6": "(PRODUCT)RED"
+    },
+    "iPhone9,4": {
+      "1": "Black",
+      "2": "Silver",
+      "3": "Gold",
+      "4": "Rose Gold",
+      "5": "Jet Black",
+      "6": "(PRODUCT)RED"
+    },
+    "iPod9,1": {
+      "2": "Silver",
+      "3": "Gold",
+      "4": "Pink",
+      "5": "Space Gray",
+      "6": "Red",
+      "9": "Blue"
     }
   }
 }
