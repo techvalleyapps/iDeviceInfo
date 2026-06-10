@@ -36,7 +36,7 @@ namespace iDeviceInfo.Forms
 
         private static readonly string[] RowKeys =
         {
-            "Device Name", "Model", "iOS Build", "Serial Number",
+            "Device Name", "Model", "Color", "iOS Build", "Serial Number",
             "IMEI", "IMEI 2", "Battery Level", "Battery Health", "UDID"
         };
 
@@ -379,10 +379,14 @@ namespace iDeviceInfo.Forms
         {
             string batt  = d.BatteryLevel + (d.IsCharging ? "  (Charging)" : "");
             string imei2 = string.IsNullOrEmpty(d.IMEI2) || d.IMEI2 == "N/A" ? "—" : d.IMEI2;
+            string color = string.IsNullOrEmpty(d.ColorName)
+                           ? (string.IsNullOrEmpty(d.ColorHex) ? "—" : d.ColorHex)
+                           : d.ColorName;
 
-            string[] display = { d.DeviceName, d.FullModelName, d.iOSVersion,
+            string[] display = { d.DeviceName, d.FullModelName, color, d.iOSVersion,
                                  d.SerialNumber, d.IMEI, imei2, batt, d.BatteryHealth, d.UDID };
-            string[] copy    = { d.DeviceName, d.FullModelName, d.iOSVersion,
+            string[] copy    = { d.DeviceName, d.FullModelName, color == "—" ? "" : color,
+                                 d.iOSVersion,
                                  d.SerialNumber, d.IMEI, imei2 == "—" ? "" : imei2,
                                  d.BatteryLevel + (d.IsCharging ? " (Charging)" : ""),
                                  d.BatteryHealth, d.UDID };
@@ -399,7 +403,8 @@ namespace iDeviceInfo.Forms
             }
 
             _hTitle.Text    = d.DeviceName;
-            _hSub.Text      = d.FullModelName;
+            _hSub.Text      = d.FullModelName +
+                              (string.IsNullOrEmpty(d.ColorName) ? "" : "  ·  " + d.ColorName);
             _cpyAll.Enabled = true;
         }
 
