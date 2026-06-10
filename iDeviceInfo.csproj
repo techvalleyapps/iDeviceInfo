@@ -36,6 +36,12 @@
     <Content Include="Resources\iDeviceInfo.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- Color database: embedded as fallback AND copied next to the exe so it
+         can be replaced when new devices launch (exe copy wins if present). -->
+    <EmbeddedResource Include="apple_device_colors.json" LogicalName="iDeviceInfo.apple_device_colors.json" />
+    <Content Include="apple_device_colors.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

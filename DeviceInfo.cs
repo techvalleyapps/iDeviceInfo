@@ -19,6 +19,12 @@ namespace iDeviceInfo
         /// <summary>iOS / iPadOS version string, e.g. "17.4.1".</summary>
         public string iOSVersion    { get; set; } = "";
 
+        /// <summary>Marketing color name, e.g. "Desert Titanium". Empty if unknown.</summary>
+        public string ColorName     { get; set; } = "";
+
+        /// <summary>Color swatch hex, e.g. "#EBD8C8". Empty if unknown.</summary>
+        public string ColorHex      { get; set; } = "";
+
         // ── Hardware IDs ─────────────────────────────────────────────────
 
         /// <summary>Device serial number (alphanumeric, ~12 chars).</summary>
@@ -84,6 +90,7 @@ namespace iDeviceInfo
         public string ToClipboardText() =>
             $"Device Name:    {DeviceName}\n" +
             $"Model:          {FullModelName}\n" +
+            (string.IsNullOrEmpty(ColorName) ? "" : $"Color:          {ColorName}\n") +
             $"iOS Build:      {iOSVersion}\n" +
             $"Serial Number:  {SerialNumber}\n" +
             $"IMEI:           {IMEI}\n" +

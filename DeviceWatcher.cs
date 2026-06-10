@@ -393,6 +393,15 @@ namespace iDeviceInfo
                     if (string.IsNullOrEmpty(info.ModelName))
                         info.ModelName = LookupModelName(info.ProductType);
 
+                    // Device color — lockdownd returns a name, a hex string or a
+                    // model-specific integer depending on device generation.
+                    string? devColor = ReadKey(device, null, "DeviceColor");
+                    string? encColor = ReadKey(device, null, "DeviceEnclosureColor");
+                    var (colorName, colorHex) =
+                        DeviceColorResolver.Resolve(info.ProductType, devColor, encColor);
+                    if (!string.IsNullOrEmpty(colorName)) info.ColorName = colorName;
+                    if (!string.IsNullOrEmpty(colorHex))  info.ColorHex  = colorHex;
+
                     string? imei = ReadKey(device, null,
                         "InternationalMobileEquipmentIdentity");
                     if (!string.IsNullOrEmpty(imei)) info.IMEI = imei;
@@ -483,7 +492,11 @@ namespace iDeviceInfo
         // ── Model name lookup ─────────────────────────────────────────────
 
         private static string LookupModelName(string productType)
-            => ModelNames.TryGetValue(productType, out string? name) ? name : productType;
+            => ModelNames.TryGetValue(productType, out string? name)
+               ? name
+               // Fallback: marketing names shipped in apple_device_colors.json,
+               // which covers devices newer than this built-in table.
+               : DeviceColorResolver.LookupProductName(productType) ?? productType;
 
         private static readonly Dictionary<string, string> ModelNames =
             new(StringComparer.OrdinalIgnoreCase)
