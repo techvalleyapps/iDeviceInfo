@@ -134,10 +134,15 @@ namespace iDeviceInfo
             return result;
         }
 
+        /// <summary>Diagnostics from the last image probe — shown in the debug dump.</summary>
+        public static string LastProbeDebug { get; private set; } = "(no probe yet)";
+
         /// <summary>
-        /// Votes each opaque body pixel for its nearest palette color and returns
-        /// the winner. The central region (the screen) is excluded so an all-black
-        /// display doesn't outvote the housing color.
+        /// Identifies the housing color by sampling only the thin rim of the
+        /// device silhouette (just inside the outline). The screen — which is
+        /// most of a modern device's front — and the image background are never
+        /// sampled, so they can't skew the result. Shading on the rendered rim
+        /// is tolerated by comparing chroma (hue) more strongly than brightness.
         /// </summary>
         private static ColorEntry? MatchBodyColor(Bitmap bmp, List<ColorEntry> candidates)
         {
@@ -147,38 +152,95 @@ namespace iDeviceInfo
             if (palette.Count == 0) return null;
 
             int w = bmp.Width, h = bmp.Height;
-            int sx0 = (int)(w * 0.28), sx1 = (int)(w * 0.72);   // screen exclusion zone
-            int sy0 = (int)(h * 0.12), sy1 = (int)(h * 0.85);
 
-            var votes = new int[palette.Count];
-            for (int y = 0; y < h; y += 2)
-            for (int x = 0; x < w; x += 2)
-            {
-                if (x > sx0 && x < sx1 && y > sy0 && y < sy1) continue; // skip screen
-                Color px = bmp.GetPixel(x, y);
-                if (px.A < 220) continue;                              // skip background
-
-                int bestIdx = -1; double bestDist = double.MaxValue;
-                for (int i = 0; i < palette.Count; i++)
+            // Background = average of the four 3x3 corner patches. The probe must
+            // work whether the PNG background is transparent OR a solid color.
+            (double r, double g, double b, double a) bg = (0, 0, 0, 0);
+            int n = 0;
+            foreach ((int cx, int cy) in new[] { (1, 1), (w - 2, 1), (1, h - 2), (w - 2, h - 2) })
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
                 {
-                    var (_, rgb) = palette[i];
-                    double d = Math.Pow(px.R - rgb.r, 2)
-                             + Math.Pow(px.G - rgb.g, 2)
-                             + Math.Pow(px.B - rgb.b, 2);
-                    if (d < bestDist) { bestDist = d; bestIdx = i; }
+                    Color p = bmp.GetPixel(cx + dx, cy + dy);
+                    bg = (bg.r + p.R, bg.g + p.G, bg.b + p.B, bg.a + p.A); n++;
                 }
-                // Only count pixels reasonably close to SOME palette color, so
-                // shadows / highlights / camera lenses don't pollute the vote.
-                if (bestIdx >= 0 && bestDist <= 3 * 90 * 90) votes[bestIdx]++;
+            bg = (bg.r / n, bg.g / n, bg.b / n, bg.a / n);
+
+            bool IsBackground(Color p)
+            {
+                if (p.A < 220) return true;                       // transparent
+                if (bg.a < 220) return false;                     // bg transparent, px opaque
+                double d = Math.Pow(p.R - bg.r, 2) + Math.Pow(p.G - bg.g, 2) + Math.Pow(p.B - bg.b, 2);
+                return d < 35 * 35 * 3;                           // same as bg color
             }
 
-            int winner = -1, max = 0, total = votes.Sum();
+            // Walk each row inward from both sides; the first non-background run
+            // is the device outline — sample a few pixels just inside it.
+            var votes = new int[palette.Count];
+            int samples = 0;
+            int yStart = (int)(h * 0.18), yEnd = (int)(h * 0.82); // avoid rounded corners
+            const int skipEdge = 2, rimWidth = 6;
+
+            for (int y = yStart; y < yEnd; y += 2)
+            {
+                foreach (bool fromLeft in new[] { true, false })
+                {
+                    int x = fromLeft ? 0 : w - 1, step = fromLeft ? 1 : -1, run = 0;
+                    while (x >= 0 && x < w)
+                    {
+                        if (!IsBackground(bmp.GetPixel(x, y))) { if (++run >= 2) break; }
+                        else run = 0;
+                        x += step;
+                    }
+                    if (x < 0 || x >= w) continue;
+
+                    for (int k = skipEdge; k < skipEdge + rimWidth; k++)
+                    {
+                        int sx = x + k * step;
+                        if (sx < 0 || sx >= w) break;
+                        Color px = bmp.GetPixel(sx, y);
+                        if (IsBackground(px)) break;
+
+                        int best = -1; double bestD = double.MaxValue;
+                        for (int i = 0; i < palette.Count; i++)
+                        {
+                            double d = ChromaDistance(px, palette[i].rgb);
+                            if (d < bestD) { bestD = d; best = i; }
+                        }
+                        if (best >= 0) { votes[best]++; samples++; }
+                    }
+                }
+            }
+
+            int winner = -1, max = 0;
             for (int i = 0; i < votes.Length; i++)
                 if (votes[i] > max) { max = votes[i]; winner = i; }
 
-            // Demand a meaningful margin: winner must hold >45% of all valid votes.
-            return winner >= 0 && total > 50 && max > total * 0.45
+            LastProbeDebug =
+                $"samples={samples}, votes=[{string.Join(", ", palette.Select((p, i) => $"{p.entry.Name}:{votes[i]}"))}]";
+
+            // Require enough rim pixels and a >40% winner share.
+            return winner >= 0 && samples > 60 && max > samples * 0.40
                    ? palette[winner].entry : null;
+        }
+
+        /// <summary>
+        /// Distance that prioritizes hue/chroma over brightness, so a shaded or
+        /// highlighted rendering of "Blue" still lands on Blue rather than Black.
+        /// </summary>
+        private static double ChromaDistance(Color px, (int r, int g, int b) pal)
+        {
+            double lp = 0.299 * px.R + 0.587 * px.G + 0.114 * px.B;
+            double lc = 0.299 * pal.r + 0.587 * pal.g + 0.114 * pal.b;
+
+            // chroma = color with luminance removed
+            double crP = px.R - lp, cgP = px.G - lp, cbP = px.B - lp;
+            double crC = pal.r - lc, cgC = pal.g - lc, cbC = pal.b - lc;
+
+            double chroma = Math.Pow(crP - crC, 2) + Math.Pow(cgP - cgC, 2) + Math.Pow(cbP - cbC, 2);
+            double luma   = Math.Pow(lp - lc, 2);
+
+            return chroma * 4.0 + luma * 0.6;
         }
 
         // ── Matching helpers ──────────────────────────────────────────────

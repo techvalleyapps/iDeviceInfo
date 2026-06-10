@@ -696,6 +696,7 @@ namespace iDeviceInfo
                     lines.Add($"   Color:         {(string.IsNullOrEmpty(info.ColorName) ? "(unresolved)" : info.ColorName)}" +
                               $"{(string.IsNullOrEmpty(info.ColorHex) ? "" : " " + info.ColorHex)}");
                     lines.Add($"   ColorRaw:      {(string.IsNullOrEmpty(info.ColorRaw) ? "(keys returned nothing)" : info.ColorRaw)}");
+                    lines.Add($"   ColorProbe:    {DeviceColorResolver.LastProbeDebug}");
                     lines.Add($"   StorageGB:     {(info.StorageGB > 0 ? info.StorageGB + "GB" : "N/A")}");
                     lines.Add($"   iOSVersion:    {info.iOSVersion}");
                     lines.Add($"   SerialNumber:  {info.SerialNumber}");
