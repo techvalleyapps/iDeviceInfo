@@ -39,3 +39,6 @@ $RECYCLE.BIN/
 *.bak
 *.log
 record_copy.db
+
+# Reference data extracted from 3uTools (keep local, don't ship)
+3utools_devices_table.txt
