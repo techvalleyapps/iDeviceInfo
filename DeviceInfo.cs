@@ -25,6 +25,9 @@ namespace iDeviceInfo
         /// <summary>Color swatch hex, e.g. "#EBD8C8". Empty if unknown.</summary>
         public string ColorHex      { get; set; } = "";
 
+        /// <summary>Raw lockdownd color values for debugging, e.g. "device=1, enclosure=5".</summary>
+        public string ColorRaw      { get; set; } = "";
+
         // ── Hardware IDs ─────────────────────────────────────────────────
 
         /// <summary>Device serial number (alphanumeric, ~12 chars).</summary>

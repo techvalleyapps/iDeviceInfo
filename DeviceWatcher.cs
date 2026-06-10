@@ -397,6 +397,8 @@ namespace iDeviceInfo
                     // model-specific integer depending on device generation.
                     string? devColor = ReadKey(device, null, "DeviceColor");
                     string? encColor = ReadKey(device, null, "DeviceEnclosureColor");
+                    if (devColor != null || encColor != null)
+                        info.ColorRaw = $"device={devColor ?? "?"}, enclosure={encColor ?? "?"}";
                     var (colorName, colorHex) =
                         DeviceColorResolver.Resolve(info.ProductType, devColor, encColor);
                     if (!string.IsNullOrEmpty(colorName)) info.ColorName = colorName;
@@ -691,6 +693,9 @@ namespace iDeviceInfo
                     lines.Add($"   DeviceName:    {info.DeviceName}");
                     lines.Add($"   Model:         {info.FullModelName}");
                     lines.Add($"   ProductType:   {info.ProductType}");
+                    lines.Add($"   Color:         {(string.IsNullOrEmpty(info.ColorName) ? "(unresolved)" : info.ColorName)}" +
+                              $"{(string.IsNullOrEmpty(info.ColorHex) ? "" : " " + info.ColorHex)}");
+                    lines.Add($"   ColorRaw:      {(string.IsNullOrEmpty(info.ColorRaw) ? "(keys returned nothing)" : info.ColorRaw)}");
                     lines.Add($"   StorageGB:     {(info.StorageGB > 0 ? info.StorageGB + "GB" : "N/A")}");
                     lines.Add($"   iOSVersion:    {info.iOSVersion}");
                     lines.Add($"   SerialNumber:  {info.SerialNumber}");
