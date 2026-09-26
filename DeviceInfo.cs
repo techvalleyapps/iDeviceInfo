@@ -10,14 +10,8 @@ namespace iDeviceInfo
         /// <summary>"iOS" (default) or "Android".</summary>
         public string Platform      { get; set; } = "iOS";
 
-        /// <summary>adb transport id (Android only); used to match disconnect events.</summary>
-        public string AdbId         { get; set; } = "";
-
         /// <summary>Windows Portable Devices id (Android read over MTP without USB debugging).</summary>
         public string MtpId         { get; set; } = "";
-
-        /// <summary>True when only basic info could be read (MTP, no USB debugging).</summary>
-        public bool   Limited       { get; set; }
 
         public bool   IsAndroid     => Platform == "Android";
 

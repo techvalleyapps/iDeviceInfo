@@ -410,8 +410,7 @@ namespace iDeviceInfo.Forms
 
             _hTitle.Text    = d.DeviceName;
             _hSub.Text      = d.FullModelName +
-                              (string.IsNullOrEmpty(d.ColorName) ? "" : "  ·  " + d.ColorName) +
-                              (d.Limited ? "  ·  limited info (enable USB debugging for more)" : "");
+                              (string.IsNullOrEmpty(d.ColorName) ? "" : "  ·  " + d.ColorName);
             _cpyAll.Enabled = true;
         }
 
