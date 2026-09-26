@@ -74,7 +74,7 @@ namespace iDeviceInfo
 
         private void PollOnce()
         {
-            var devices = MediaDevice.GetDevices().ToList();
+            var devices = (MediaDeviceManager.Instance.GetDevices() ?? Enumerable.Empty<MediaDevice>()).ToList();
             var present = new HashSet<string>(devices.Select(d => d.DeviceId), StringComparer.OrdinalIgnoreCase);
 
             foreach (var id in _known.Keys.Where(k => !present.Contains(k)).ToList())
@@ -97,7 +97,7 @@ namespace iDeviceInfo
                     Raise(() => DeviceConnected?.Invoke(this, info));
                 }
                 catch { /* device busy / locked: try again next poll */ }
-                finally { dev.Dispose(); }
+                // Devices are owned by MediaDeviceManager — do not dispose them here.
             }
         }
 
