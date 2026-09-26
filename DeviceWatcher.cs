@@ -316,6 +316,11 @@ namespace iDeviceInfo
             // set and this returns instantly.
             try { _pairingComplete.Wait(ct); } catch (OperationCanceledException) { return; }
 
+            // A read without a lockdown session only has the basic fields (no IMEI, battery,
+            // storage...). Retry a few times before settling for it, so the user doesn't have
+            // to replug to get the full details.
+            int incompleteReads = 0;
+
             // Poll until trusted, disconnected, or disposed
             while (!ct.IsCancellationRequested && !_disposed)
             {
@@ -333,6 +338,7 @@ namespace iDeviceInfo
                     // Trusted — read all fields now
                     DeviceInfo? di = ReadAllDeviceFields(device);
                     if (di == null || string.IsNullOrEmpty(di.SerialNumber)) continue;
+                    if (!di.FullRead && ++incompleteReads < 6) continue;
 
                     _uiCtx!.Post(_ =>
                     {
@@ -379,6 +385,8 @@ namespace iDeviceInfo
                                  AMD.AMDeviceStartSession(device)    == 0;
                 if (sessionOk)
                 {
+                    info.FullRead = true;
+
                     // Retry basics — some fields only come back after a session opens
                     if (string.IsNullOrEmpty(info.SerialNumber))
                         info.SerialNumber = ReadKey(device, null, "SerialNumber") ?? "";
@@ -392,6 +400,11 @@ namespace iDeviceInfo
                         info.DeviceName = ReadKey(device, null, "DeviceName") ?? "Unknown Device";
                     if (string.IsNullOrEmpty(info.ModelName))
                         info.ModelName = LookupModelName(info.ProductType);
+
+                    // Append the build number, e.g. "17.4.1 (21E236)"
+                    string? build = ReadKey(device, null, "BuildVersion");
+                    if (!string.IsNullOrEmpty(build) && !string.IsNullOrEmpty(info.iOSVersion))
+                        info.iOSVersion += $" ({build})";
 
                     // Device color — lockdownd returns a name, a hex string or a
                     // model-specific integer depending on device generation.
@@ -489,7 +502,7 @@ namespace iDeviceInfo
         {
             // Apple uses marketing gigabytes (1 GB = 1,000,000,000 bytes)
             double gb = bytes / 1_000_000_000.0;
-            int[] sizes = { 4, 8, 16, 32, 64, 128, 256, 512, 1024 };
+            int[] sizes = { 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048 };
             int best = sizes[0];
             double minDiff = double.MaxValue;
             foreach (int s in sizes)

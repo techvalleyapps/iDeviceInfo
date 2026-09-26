@@ -33,11 +33,6 @@
 
 
   <ItemGroup>
-    <!-- Windows Portable Devices wrapper: reads Android phones over MTP (no USB debugging) -->
-    <PackageReference Include="MediaDevices" Version="2.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
     <Content Include="Resources\iDeviceInfo.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

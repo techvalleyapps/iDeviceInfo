@@ -38,7 +38,7 @@ VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Installer
-AppComments=iOS and Android device info reader — reads Serial, IMEI, Battery Health from connected devices.
+AppComments=iOS device info reader — reads Serial, IMEI, Battery Health from connected devices.
 CloseApplications=yes
 CloseApplicationsFilter=*{#MyAppExeName}
 
