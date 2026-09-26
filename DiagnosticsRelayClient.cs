@@ -36,6 +36,7 @@ namespace iDeviceInfo
                 // AMDServiceConnectionSend/Receive — nothing we can do.
                 if (kind == ConnectionKind.LegacySocket) return null;
 
+                Candidate? best = null;
                 foreach ((string key, bool isClass) in new[]
                 {
                     ("AppleSmartBattery", false),
@@ -47,10 +48,15 @@ namespace iDeviceInfo
                     XDocument? response = QueryIoRegistry(connection, key, isClass);
                     if (response == null) continue;
 
-                    string? health = BatteryHealthFromDiagnostics(response);
-                    if (!string.IsNullOrEmpty(health))
-                        return health;
+                    Candidate? c = BatteryHealthFromDiagnostics(response);
+                    if (c != null && (best == null || c.Priority < best.Priority))
+                        best = c;
+
+                    // Priority 1-2 are the accurate sources; no need to keep asking.
+                    if (best != null && best.Priority <= 2) break;
                 }
+
+                if (best != null) return best.Text;
             }
             catch
             {
@@ -172,33 +178,57 @@ namespace iDeviceInfo
             return partial;
         }
 
-        private static string? BatteryHealthFromDiagnostics(XDocument doc)
+        private sealed record Candidate(int Priority, string Text);
+
+        // Anything outside this range is a bad read (wrong field, half-updated value), not a real health.
+        private const double MinPlausible = 30d;
+        private const double MaxPlausible = 110d;
+
+        /// <summary>
+        /// Picks the most reliable health figure in the response, best source first:
+        ///   1. a ready-made percentage key
+        ///   2. NominalChargeCapacity / DesignCapacity (mAh — matches iOS Settings)
+        ///   3. AppleRawMaxCapacity / DesignCapacity (mAh — jitters with temperature/load)
+        ///   4. MaxCapacity / DesignCapacity, only when MaxCapacity is in mAh
+        /// On iOS, MaxCapacity is often already a percentage (e.g. 100); dividing that by the
+        /// mAh design capacity gave nonsense like 3%, so values below 200 are never used as mAh.
+        /// </summary>
+        private static Candidate? BatteryHealthFromDiagnostics(XDocument doc)
         {
             string? direct = FindPlistStringValue(doc, "MaximumCapacityPercent") ??
                              FindPlistStringValue(doc, "BatteryHealthPercent") ??
                              FindPlistStringValue(doc, "BatteryMaximumCapacity");
-            if (TryParseNumber(direct, out double directPercent))
-                return FormatPercent(directPercent);
+            if (TryParseNumber(direct, out double directPercent) && IsPlausible(directPercent))
+                return new Candidate(1, FormatPercent(directPercent));
 
-            string? actualText = FindPlistStringValue(doc, "AppleRawMaxCapacity") ??
-                                 FindPlistStringValue(doc, "MaxCapacity") ??
-                                 FindPlistStringValue(doc, "NominalChargeCapacity");
-            string? designText = FindPlistStringValue(doc, "DesignCapacity");
+            if (!TryParseNumber(FindPlistStringValue(doc, "DesignCapacity"), out double design) || design < 200)
+                return null;
 
-            if (TryParseNumber(actualText, out double actual) &&
-                TryParseNumber(designText, out double design) &&
-                actual > 0 &&
-                design > 0)
+            (int priority, string key)[] sources =
             {
-                return FormatPercent(actual / design * 100d);
+                (2, "NominalChargeCapacity"),
+                (3, "AppleRawMaxCapacity"),
+                (4, "MaxCapacity"),
+            };
+
+            foreach (var (priority, key) in sources)
+            {
+                if (!TryParseNumber(FindPlistStringValue(doc, key), out double actual)) continue;
+                if (actual < 200) continue;   // a percentage or garbage, not mAh
+                double percent = actual / design * 100d;
+                if (IsPlausible(percent))
+                    return new Candidate(priority, FormatPercent(percent));
             }
 
             return null;
         }
 
+        private static bool IsPlausible(double percent) =>
+            percent >= MinPlausible && percent <= MaxPlausible;
+
         private static string FormatPercent(double value)
         {
-            double rounded = Math.Round(value, MidpointRounding.AwayFromZero);
+            double rounded = Math.Min(100d, Math.Round(value, MidpointRounding.AwayFromZero));
             return rounded.ToString("0", CultureInfo.InvariantCulture) + "%";
         }
 
