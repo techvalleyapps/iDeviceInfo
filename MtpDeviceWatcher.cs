@@ -10,12 +10,12 @@ using MediaDevices;
 namespace iDeviceInfo
 {
     /// <summary>
-    /// Fallback for Android phones that do NOT have USB debugging enabled.
+    /// Reads Android phones (Samsung, Pixel, Xiaomi, ...) over MTP, with no USB debugging needed.
     /// Windows sees them as MTP portable devices; through the Windows Portable Devices
     /// API we can still read name, manufacturer, model, battery %, storage size and
     /// (via the parent USB device) the real serial number.
     ///
-    /// IMEI, Android version and battery health are not exposed over MTP.
+    /// IMEI, Android version and battery health are not exposed over MTP, so they show N/A.
     /// Same events as <see cref="DeviceWatcher"/>; fired on the thread that called Start().
     /// </summary>
     public sealed class MtpDeviceWatcher : IDisposable
@@ -23,7 +23,7 @@ namespace iDeviceInfo
         public event EventHandler<DeviceInfo>? DeviceConnected;
         public event EventHandler<string>?     DeviceDisconnected;
 
-        private const string Unavailable = "N/A (needs USB debugging)";
+        private const string Unavailable = "N/A";
         private const int    MaxRetries  = 10;   // re-read while the phone is locked (no storage yet)
 
         private readonly Dictionary<string, int> _known = new(StringComparer.OrdinalIgnoreCase); // id → storage retries left
@@ -128,7 +128,6 @@ namespace iDeviceInfo
                 var info = new DeviceInfo
                 {
                     Platform      = "Android",
-                    Limited       = true,
                     MtpId         = dev.DeviceId,
                     DeviceName    = name,
                     ModelName     = brand.Length == 0 || shown.StartsWith(brand, StringComparison.OrdinalIgnoreCase)
@@ -149,7 +148,7 @@ namespace iDeviceInfo
                         foreach (var d in drives)
                         {
                             // First drive is the internal shared storage; an SD card would inflate the size.
-                            info.StorageGB = AdbDeviceWatcher.RoundToMarketedGB(d.TotalSize / 1024.0 / 1024.0 / 1024.0);
+                            info.StorageGB = RoundToMarketedGB(d.TotalSize / 1024.0 / 1024.0 / 1024.0);
                             break;
                         }
                 }
@@ -158,6 +157,14 @@ namespace iDeviceInfo
                 return info;
             }
             finally { try { dev.Disconnect(); } catch { } }
+        }
+
+        /// <summary>Rounds usable storage up to the marketed size (16, 32, 64, 128 ...).</summary>
+        private static int RoundToMarketedGB(double gb)
+        {
+            foreach (int size in new[] { 16, 32, 64, 128, 256, 512, 1024, 2048 })
+                if (gb <= size) return size;
+            return (int)Math.Ceiling(gb);
         }
 
         // ── Serial number helpers ─────────────────────────────────────────
