@@ -114,7 +114,7 @@ namespace iDeviceInfo
                 // iPhones/iPads also show up as portable devices — DeviceWatcher handles those.
                 if (maker.Contains("Apple", StringComparison.OrdinalIgnoreCase)) return null;
                 // Cameras / media players are not phones.
-                string type = dev.DeviceType?.ToString() ?? "";
+                string type = dev.DeviceType.ToString() ?? "";
                 if (type.Contains("Camera", StringComparison.OrdinalIgnoreCase) ||
                     type.Contains("Media",  StringComparison.OrdinalIgnoreCase)) return null;
 

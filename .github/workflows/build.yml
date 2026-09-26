@@ -31,16 +31,24 @@ jobs:
         run: dotnet restore iDeviceInfo.csproj
 
       - name: Publish self-contained exe
-        run: >
-          dotnet publish iDeviceInfo.csproj
-          --configuration Release
-          --runtime win-x64
-          --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:AssemblyVersion=${{ steps.version.outputs.VERSION }}
-          -p:FileVersion=${{ steps.version.outputs.VERSION }}
-          --output ./publish/win-x64
+        shell: pwsh
+        run: |
+          dotnet publish iDeviceInfo.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:AssemblyVersion=${{ steps.version.outputs.VERSION }} `
+            -p:FileVersion=${{ steps.version.outputs.VERSION }} `
+            --output ./publish/win-x64 | Tee-Object -FilePath build.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            # Surface compiler errors as annotations so they show on the run summary
+            Select-String -Path build.log -Pattern ' error ' | Select-Object -ExpandProperty Line -Unique -First 15 |
+              ForEach-Object { Write-Host "::error::$($_.Trim())" }
+            exit $code
+          }
 
       # ── 4. Build installer with Inno Setup ───────────────────────────────
       - name: Build installer (Inno Setup)
