@@ -7,20 +7,6 @@ namespace iDeviceInfo
     {
         // ── Identity ──────────────────────────────────────────────────────
 
-        /// <summary>"iOS" (default) or "Android".</summary>
-        public string Platform      { get; set; } = "iOS";
-
-        /// <summary>Windows Portable Devices id (Android read over MTP without USB debugging).</summary>
-        public string MtpId         { get; set; } = "";
-
-        public bool   IsAndroid     => Platform == "Android";
-
-        /// <summary>Row label for <see cref="iOSVersion"/>.</summary>
-        public string OsLabel       => IsAndroid ? "Android OS" : "iOS Build";
-
-        /// <summary>Row label for <see cref="UDID"/> (Android ID on Android).</summary>
-        public string UdidLabel     => IsAndroid ? "Android ID" : "UDID";
-
         /// <summary>User-visible device name (e.g. "John's iPhone").</summary>
         public string DeviceName    { get; set; } = "Unknown Device";
 
@@ -32,6 +18,12 @@ namespace iDeviceInfo
 
         /// <summary>iOS / iPadOS version string, e.g. "17.4.1".</summary>
         public string iOSVersion    { get; set; } = "";
+
+        /// <summary>
+        /// True when the full lockdown session opened, so privileged fields (IMEI, battery,
+        /// storage, color) were actually read. False = only the basic fields came back.
+        /// </summary>
+        internal bool FullRead      { get; set; }
 
         /// <summary>Marketing color name, e.g. "Desert Titanium". Empty if unknown.</summary>
         public string ColorName     { get; set; } = "";
@@ -114,6 +106,6 @@ namespace iDeviceInfo
             (string.IsNullOrEmpty(IMEI2) ? "" : $"IMEI 2:         {IMEI2}\n") +
             $"Battery Level:  {BatteryLevel}{(IsCharging ? " (Charging)" : "")}\n" +
             $"Battery Health: {BatteryHealth}\n" +
-            $"{(UdidLabel + ":").PadRight(16)}{UDID}";
+            $"UDID:           {UDID}";
     }
 }
