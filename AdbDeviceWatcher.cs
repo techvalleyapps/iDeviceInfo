@@ -204,7 +204,12 @@ namespace iDeviceInfo
             var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 2 || !double.TryParse(parts[1], out var kb)) return 0;
 
-            double gb = kb / 1024.0 / 1024.0;
+            return RoundToMarketedGB(kb / 1024.0 / 1024.0);
+        }
+
+        /// <summary>Rounds usable storage up to the marketed size (16, 32, 64, 128 ...).</summary>
+        public static int RoundToMarketedGB(double gb)
+        {
             foreach (int size in new[] { 16, 32, 64, 128, 256, 512, 1024, 2048 })
                 if (gb <= size) return size;
             return (int)Math.Ceiling(gb);

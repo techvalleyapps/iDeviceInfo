@@ -15,6 +15,7 @@ namespace iDeviceInfo
         private readonly NotifyIcon    _tray;
         private readonly DeviceWatcher _watcher;
         private readonly AdbDeviceWatcher _adbWatcher;
+        private readonly MtpDeviceWatcher _mtpWatcher;
         private readonly FloatingCopyButton _floatingBtn;
 
         // ── Per-device tracking ───────────────────────────────────────────
@@ -53,7 +54,7 @@ namespace iDeviceInfo
             var exitItem         = new ToolStripMenuItem("Exit");
 
             showItem.Click    += (_, _) => _window.ShowFromTray();
-            refreshItem.Click += (_, _) => { _watcher.Restart(); _adbWatcher.Restart(); };
+            refreshItem.Click += (_, _) => { _watcher.Restart(); _adbWatcher.Restart(); _mtpWatcher.Restart(); };
             debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
             exitItem.Click    += (_, _) => ExitApp();
 
@@ -76,10 +77,15 @@ namespace iDeviceInfo
             // ── Device watcher ─────────────────────────────────────────────
             _watcher    = new DeviceWatcher();
             _adbWatcher = new AdbDeviceWatcher();
+            _mtpWatcher = new MtpDeviceWatcher();
 
             EventHandler<DeviceInfo> onConnected = (_, info) =>
             {
                 string serial = info.SerialNumber;
+
+                // MTP-only info must never overwrite the richer adb data for the same phone
+                if (info.Limited && _devices.TryGetValue(serial, out var existing) && !existing.Limited) return;
+
                 bool   isNew  = !_devices.ContainsKey(serial);
 
                 _devices[serial] = info;
@@ -104,7 +110,9 @@ namespace iDeviceInfo
             EventHandler<string> onDisconnected = (_, serial) =>
             {
                 // Android watcher reports the adb id, which may differ from the serial
-                serial = _devices.Values.FirstOrDefault(d => d.AdbId.Equals(serial, StringComparison.OrdinalIgnoreCase))?.SerialNumber
+                serial = _devices.Values.FirstOrDefault(d =>
+                             d.AdbId.Equals(serial, StringComparison.OrdinalIgnoreCase) ||
+                             d.MtpId.Equals(serial, StringComparison.OrdinalIgnoreCase))?.SerialNumber
                          ?? serial;
                 if (!_devices.TryGetValue(serial, out DeviceInfo? info)) return;
 
@@ -131,6 +139,8 @@ namespace iDeviceInfo
             _watcher.DeviceDisconnected     += onDisconnected;
             _adbWatcher.DeviceConnected     += onConnected;
             _adbWatcher.DeviceDisconnected  += onDisconnected;
+            _mtpWatcher.DeviceConnected     += onConnected;
+            _mtpWatcher.DeviceDisconnected  += onDisconnected;
             _adbWatcher.DeviceUnauthorized  += (_, _) =>
                 ShowBalloon("Android device found", "Unlock the phone and tap \"Allow USB debugging\".");
 
@@ -145,6 +155,7 @@ namespace iDeviceInfo
                 Application.Idle -= onIdle!;
                 _watcher.Start();
                 _adbWatcher.Start();
+                _mtpWatcher.Start();
             };
             Application.Idle += onIdle;
         }
@@ -253,6 +264,7 @@ namespace iDeviceInfo
             try { _tray.Visible = false; }   catch { }
             try { _watcher.Dispose(); }       catch { }
             try { _adbWatcher.Dispose(); }    catch { }
+            try { _mtpWatcher.Dispose(); }    catch { }
             try { _window.Dispose(); }        catch { }
             try { _floatingBtn.Dispose(); }   catch { }
             try { _tray.Dispose(); }          catch { }
@@ -265,6 +277,7 @@ namespace iDeviceInfo
             {
                 _watcher.Dispose();
                 _adbWatcher.Dispose();
+                _mtpWatcher.Dispose();
                 _window.Dispose();
                 _floatingBtn.Dispose();
                 _tray.Visible = false;
