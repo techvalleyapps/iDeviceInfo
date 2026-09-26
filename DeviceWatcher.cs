@@ -418,7 +418,13 @@ namespace iDeviceInfo
                         info.BatteryLevel = batt + "%";
 
                     // Battery health varies by iOS version; try diagnostics first.
-                    string? health = DiagnosticsRelayClient.ReadBatteryHealth(device);
+                    // The relay can hand back nothing/garbage right after connect; retry before giving up.
+                    string? health = null;
+                    for (int attempt = 0; attempt < 3 && string.IsNullOrEmpty(health); attempt++)
+                    {
+                        if (attempt > 0) Thread.Sleep(700);
+                        health = DiagnosticsRelayClient.ReadBatteryHealth(device);
+                    }
                     if (string.IsNullOrEmpty(health))
                     {
                         string? lockdownHealth =
@@ -427,8 +433,11 @@ namespace iDeviceInfo
                             ReadKey(device, "com.apple.mobile.battery", "BatteryHealthPercent")    ??
                             ReadKey(device, null,                        "BatteryMaximumCapacity");
 
-                        if (!string.IsNullOrEmpty(lockdownHealth))
-                            health = lockdownHealth + "%";
+                        // Only trust a sane percentage
+                        if (double.TryParse(lockdownHealth, System.Globalization.NumberStyles.Float,
+                                System.Globalization.CultureInfo.InvariantCulture, out double lp) &&
+                            lp >= 30 && lp <= 110)
+                            health = Math.Min(100, Math.Round(lp)) + "%";
                     }
                     if (!string.IsNullOrEmpty(health))
                         info.BatteryHealth = health;
