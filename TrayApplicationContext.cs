@@ -14,7 +14,6 @@ namespace iDeviceInfo
         private readonly MainForm      _window;
         private readonly NotifyIcon    _tray;
         private readonly DeviceWatcher _watcher;
-        private readonly MtpDeviceWatcher _mtpWatcher;
         private readonly FloatingCopyButton _floatingBtn;
 
         // ── Per-device tracking ───────────────────────────────────────────
@@ -53,7 +52,7 @@ namespace iDeviceInfo
             var exitItem         = new ToolStripMenuItem("Exit");
 
             showItem.Click    += (_, _) => _window.ShowFromTray();
-            refreshItem.Click += (_, _) => { _watcher.Restart(); _mtpWatcher.Restart(); };
+            refreshItem.Click += (_, _) => { _watcher.Restart(); };
             debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
             exitItem.Click    += (_, _) => ExitApp();
 
@@ -75,12 +74,10 @@ namespace iDeviceInfo
 
             // ── Device watcher ─────────────────────────────────────────────
             _watcher    = new DeviceWatcher();
-            _mtpWatcher = new MtpDeviceWatcher();
 
             EventHandler<DeviceInfo> onConnected = (_, info) =>
             {
                 string serial = info.SerialNumber;
-
                 bool   isNew  = !_devices.ContainsKey(serial);
 
                 _devices[serial] = info;
@@ -104,10 +101,6 @@ namespace iDeviceInfo
 
             EventHandler<string> onDisconnected = (_, serial) =>
             {
-                // Android watcher reports the portable-device id, not the serial
-                serial = _devices.Values.FirstOrDefault(d =>
-                             d.MtpId.Equals(serial, StringComparison.OrdinalIgnoreCase))?.SerialNumber
-                         ?? serial;
                 if (!_devices.TryGetValue(serial, out DeviceInfo? info)) return;
 
                 _devices.Remove(serial);
@@ -131,8 +124,6 @@ namespace iDeviceInfo
 
             _watcher.DeviceConnected        += onConnected;
             _watcher.DeviceDisconnected     += onDisconnected;
-            _mtpWatcher.DeviceConnected     += onConnected;
-            _mtpWatcher.DeviceDisconnected  += onDisconnected;
 
             // ── Show-window signal (second launch) ────────────────────────
             Program.ShowWindowRequested += () =>
@@ -144,7 +135,6 @@ namespace iDeviceInfo
             {
                 Application.Idle -= onIdle!;
                 _watcher.Start();
-                _mtpWatcher.Start();
             };
             Application.Idle += onIdle;
         }
@@ -252,7 +242,6 @@ namespace iDeviceInfo
         {
             try { _tray.Visible = false; }   catch { }
             try { _watcher.Dispose(); }       catch { }
-            try { _mtpWatcher.Dispose(); }    catch { }
             try { _window.Dispose(); }        catch { }
             try { _floatingBtn.Dispose(); }   catch { }
             try { _tray.Dispose(); }          catch { }
@@ -264,7 +253,6 @@ namespace iDeviceInfo
             if (disposing)
             {
                 _watcher.Dispose();
-                _mtpWatcher.Dispose();
                 _window.Dispose();
                 _floatingBtn.Dispose();
                 _tray.Visible = false;

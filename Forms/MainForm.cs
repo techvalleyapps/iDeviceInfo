@@ -71,7 +71,6 @@ namespace iDeviceInfo.Forms
         // ── Live controls ─────────────────────────────────────────────────
         private readonly Label    _hTitle;
         private readonly Label    _hSub;
-        private readonly Label[]  _keys = new Label[RowKeys.Length];
         private readonly Label[]  _vals = new Label[RowKeys.Length];
         private readonly Button[] _cpys = new Button[RowKeys.Length];
         private readonly Button   _cpyAll;
@@ -261,7 +260,7 @@ namespace iDeviceInfo.Forms
             {
                 int x = cx + PX;
 
-                var keyLbl = new Label
+                inner.Controls.Add(new Label
                 {
                     Text      = RowKeys[i] + ":",
                     Font      = _lbl,
@@ -269,9 +268,7 @@ namespace iDeviceInfo.Forms
                     Location  = new Point(x, y + 5),
                     Size      = new Size(LABEL_W, ROW_H),
                     TextAlign = ContentAlignment.TopLeft
-                };
-                inner.Controls.Add(keyLbl);
-                _keys[i] = keyLbl;
+                });
                 x += LABEL_W + 8;
 
                 var valLbl = new Label
@@ -393,9 +390,6 @@ namespace iDeviceInfo.Forms
                                  d.SerialNumber, d.IMEI, imei2 == "—" ? "" : imei2,
                                  d.BatteryLevel + (d.IsCharging ? " (Charging)" : ""),
                                  d.BatteryHealth, d.UDID };
-
-            _keys[3].Text = d.OsLabel + ":";
-            _keys[9].Text = d.UdidLabel + ":";
 
             for (int i = 0; i < RowKeys.Length; i++)
             {

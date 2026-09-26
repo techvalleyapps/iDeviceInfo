@@ -77,8 +77,7 @@ jobs:
 
             ### Requirements
             - Windows 10 / 11 (x64)
-            - [Apple Devices app](https://apps.microsoft.com/detail/9NP83LWLPZ9K) (or iTunes) installed, for iPhones/iPads
-            - Android phones: connect by USB and set the mode to **File transfer (MTP)** with the screen unlocked (no USB debugging needed)
+            - [Apple Devices app](https://apps.microsoft.com/detail/9NP83LWLPZ9K) (or iTunes) installed
 
             ---
             *Built from commit ${{ github.sha }}*
