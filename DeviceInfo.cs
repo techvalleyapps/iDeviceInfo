@@ -7,6 +7,20 @@ namespace iDeviceInfo
     {
         // ── Identity ──────────────────────────────────────────────────────
 
+        /// <summary>"iOS" (default) or "Android".</summary>
+        public string Platform      { get; set; } = "iOS";
+
+        /// <summary>adb transport id (Android only); used to match disconnect events.</summary>
+        public string AdbId         { get; set; } = "";
+
+        public bool   IsAndroid     => Platform == "Android";
+
+        /// <summary>Row label for <see cref="iOSVersion"/>.</summary>
+        public string OsLabel       => IsAndroid ? "Android OS" : "iOS Build";
+
+        /// <summary>Row label for <see cref="UDID"/> (Android ID on Android).</summary>
+        public string UdidLabel     => IsAndroid ? "Android ID" : "UDID";
+
         /// <summary>User-visible device name (e.g. "John's iPhone").</summary>
         public string DeviceName    { get; set; } = "Unknown Device";
 
@@ -100,6 +114,6 @@ namespace iDeviceInfo
             (string.IsNullOrEmpty(IMEI2) ? "" : $"IMEI 2:         {IMEI2}\n") +
             $"Battery Level:  {BatteryLevel}{(IsCharging ? " (Charging)" : "")}\n" +
             $"Battery Health: {BatteryHealth}\n" +
-            $"UDID:           {UDID}";
+            $"{(UdidLabel + ":").PadRight(16)}{UDID}";
     }
 }
