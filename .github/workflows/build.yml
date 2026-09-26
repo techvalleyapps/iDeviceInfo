@@ -42,20 +42,6 @@ jobs:
           -p:FileVersion=${{ steps.version.outputs.VERSION }}
           --output ./publish/win-x64
 
-      # ── 3b. Bundle Android adb (Google platform-tools) ───────────────────
-      - name: Download Android platform-tools
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://dl.google.com/android/repository/platform-tools-latest-windows.zip -OutFile pt.zip
-          Expand-Archive pt.zip -DestinationPath pt
-          $dest = "publish/win-x64/platform-tools"
-          New-Item -ItemType Directory -Force $dest | Out-Null
-          foreach ($f in "adb.exe","AdbWinApi.dll","AdbWinUsbApi.dll") {
-            Copy-Item "pt/platform-tools/$f" $dest
-          }
-          Copy-Item "pt/platform-tools/NOTICE.txt" $dest -ErrorAction SilentlyContinue
-          if (-not (Test-Path "$dest/adb.exe")) { throw "adb.exe missing from platform-tools" }
-
       # ── 4. Build installer with Inno Setup ───────────────────────────────
       - name: Build installer (Inno Setup)
         shell: cmd
@@ -80,12 +66,11 @@ jobs:
             - Install iDeviceInfo to `Program Files\iDeviceInfo`
             - Add it to **Apps & Features** (so you can uninstall it normally)
             - Optionally start it automatically on Windows login
-            - Bundle Android `adb` (Google platform-tools) so Android phones work out of the box
 
             ### Requirements
             - Windows 10 / 11 (x64)
             - [Apple Devices app](https://apps.microsoft.com/detail/9NP83LWLPZ9K) (or iTunes) installed, for iPhones/iPads
-            - Android: enable **USB debugging** on the phone and tap **Allow** on the prompt (Samsung may also need the Samsung USB driver)
+            - Android phones: connect by USB and set the mode to **File transfer (MTP)** with the screen unlocked (no USB debugging needed)
 
             ---
             *Built from commit ${{ github.sha }}*
