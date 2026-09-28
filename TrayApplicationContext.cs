@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Linq;
@@ -23,6 +24,10 @@ namespace iDeviceInfo
 
         // ── Menu structural items ─────────────────────────────────────────
         private readonly ToolStripSeparator _deviceSeparator;
+        private readonly ContextMenuStrip   _menu;
+        private ToolStripMenuItem?          _updateItem;
+        private UpdateInfo?                 _pendingUpdate;
+        private bool                        _updateInProgress;
 
         // ─────────────────────────────────────────────────────────────────
 
@@ -64,6 +69,7 @@ namespace iDeviceInfo
             menu.Items.Add(exitItem);
 
             _tray.ContextMenuStrip = menu;
+            _menu = menu;
 
             // Left-click tray → show window
             _tray.MouseClick += (_, e) =>
@@ -135,8 +141,91 @@ namespace iDeviceInfo
             {
                 Application.Idle -= onIdle!;
                 _watcher.Start();
+                _ = CheckForUpdateAsync();
             };
             Application.Idle += onIdle;
+        }
+
+        // ── Update check ──────────────────────────────────────────────────
+
+        private async System.Threading.Tasks.Task CheckForUpdateAsync()
+        {
+            UpdateInfo? update = await UpdateChecker.CheckForUpdateAsync();
+            if (update == null) return;
+
+            _pendingUpdate = update;
+
+            var item = new ToolStripMenuItem($"⬆  Update available: {update.TagName}")
+            {
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+            item.Click += (_, _) => _ = InstallUpdateAsync();
+            _updateItem = item;
+
+            _menu.Items.Insert(0, item);
+            _menu.Items.Insert(1, new ToolStripSeparator());
+
+            ShowUpdatePopup(update.TagName);
+        }
+
+        private void ShowUpdatePopup(string tagName)
+        {
+            using var popup = new UpdateAvailableForm(tagName);
+            if (popup.ShowDialog() == DialogResult.OK)
+                _ = InstallUpdateAsync();
+        }
+
+        private async System.Threading.Tasks.Task InstallUpdateAsync()
+        {
+            if (_pendingUpdate == null || _updateInProgress) return;
+
+            if (_pendingUpdate.InstallerUrl == null)
+            {
+                // No installer asset found on the release — fall back to the browser.
+                OpenReleasePage();
+                return;
+            }
+
+            _updateInProgress = true;
+            string originalText = _updateItem!.Text!;
+            _updateItem.Text    = "⬇  Downloading update…";
+            _updateItem.Enabled = false;
+
+            try
+            {
+                string installerPath = await UpdateChecker.DownloadInstallerAsync(
+                    _pendingUpdate.InstallerUrl, _pendingUpdate.TagName);
+
+                // Installer closes the running app itself (CloseApplications=yes in the .iss),
+                // then relaunches it once done — we just need to exit so the exe isn't locked.
+                Process.Start(new ProcessStartInfo(installerPath,
+                    "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS")
+                {
+                    UseShellExecute = true
+                });
+
+                ExitApp();
+            }
+            catch
+            {
+                _updateInProgress    = false;
+                _updateItem.Text     = originalText;
+                _updateItem.Enabled  = true;
+                MessageBox.Show(
+                    "Couldn't download the update automatically. Opening the release page instead.",
+                    "iDeviceInfo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                OpenReleasePage();
+            }
+        }
+
+        private void OpenReleasePage()
+        {
+            if (_pendingUpdate == null) return;
+            try
+            {
+                Process.Start(new ProcessStartInfo(_pendingUpdate.HtmlUrl) { UseShellExecute = true });
+            }
+            catch { }
         }
 
         // ── Device menu items ─────────────────────────────────────────────
