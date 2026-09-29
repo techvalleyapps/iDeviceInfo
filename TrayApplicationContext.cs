@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Linq;
 using System.Windows.Forms;
 using iDeviceInfo.Forms;
+using iDeviceInfo.Native;
 
 namespace iDeviceInfo
 {
@@ -28,6 +29,8 @@ namespace iDeviceInfo
         private ToolStripMenuItem?          _updateItem;
         private UpdateInfo?                 _pendingUpdate;
         private bool                        _updateInProgress;
+        private ToolStripMenuItem?          _missingDepItem;
+        private bool                        _watcherStarted;
 
         // ─────────────────────────────────────────────────────────────────
 
@@ -57,7 +60,7 @@ namespace iDeviceInfo
             var exitItem         = new ToolStripMenuItem("Exit");
 
             showItem.Click    += (_, _) => _window.ShowFromTray();
-            refreshItem.Click += (_, _) => { _watcher.Restart(); };
+            refreshItem.Click += (_, _) => { if (_watcherStarted) _watcher.Restart(); else TryStartWatcher(promptIfMissing: true); };
             debugItem.Click   += (_, _) => _watcher.DumpWithAmdState();
             exitItem.Click    += (_, _) => ExitApp();
 
@@ -140,10 +143,78 @@ namespace iDeviceInfo
             onIdle = (_, _) =>
             {
                 Application.Idle -= onIdle!;
-                _watcher.Start();
+                TryStartWatcher(promptIfMissing: true);
                 _ = CheckForUpdateAsync();
             };
             Application.Idle += onIdle;
+        }
+
+        // ── Apple Mobile Device Support dependency ─────────────────────────
+
+        /// <summary>
+        /// Starts the device watcher if Apple's Mobile Device Support (MobileDevice.dll /
+        /// CoreFoundation.dll, installed by the Apple Devices app or iTunes) is present.
+        /// Without it, P/Invoking into those DLLs aborts the process natively — so we check
+        /// first instead of letting DeviceWatcher.Start() crash the app.
+        /// </summary>
+        private void TryStartWatcher(bool promptIfMissing)
+        {
+            if (_watcherStarted) return;
+
+            if (!AppleDriverCheck.IsInstalled)
+            {
+                ShowMissingDependencyState();
+                if (promptIfMissing) ShowMissingDependencyPopup();
+                return;
+            }
+
+            _watcherStarted = true;
+            RemoveMissingDependencyState();
+            _watcher.Start();
+        }
+
+        private void ShowMissingDependencyState()
+        {
+            _tray.Text = "iDeviceInfo — Apple Devices app required";
+
+            if (_missingDepItem != null) return;
+
+            var item = new ToolStripMenuItem("⚠  Install Apple Devices app…")
+            {
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+            };
+            item.Click += (_, _) => ShowMissingDependencyPopup();
+            _missingDepItem = item;
+
+            _menu.Items.Insert(0, item);
+            _menu.Items.Insert(1, new ToolStripSeparator());
+        }
+
+        private void RemoveMissingDependencyState()
+        {
+            if (_missingDepItem == null) return;
+
+            int idx = _menu.Items.IndexOf(_missingDepItem);
+            _menu.Items.RemoveAt(idx);                 // the item itself
+            if (idx < _menu.Items.Count)
+                _menu.Items.RemoveAt(idx);              // the separator right after it
+
+            _missingDepItem.Dispose();
+            _missingDepItem = null;
+        }
+
+        private void ShowMissingDependencyPopup()
+        {
+            using var popup = new MissingDependencyForm();
+            if (popup.ShowDialog() == DialogResult.OK)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(MissingDependencyForm.AppleDevicesStoreUrl)
+                        { UseShellExecute = true });
+                }
+                catch { }
+            }
         }
 
         // ── Update check ──────────────────────────────────────────────────
