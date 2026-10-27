@@ -102,23 +102,103 @@ namespace iDeviceInfo
         {
             _uiCtx = SynchronizationContext.Current ?? new SynchronizationContext();
 
-            _amdThread = new Thread(AmdThreadEntry)
+            StartAmdThread();
+
+            // Wait up to 5 s for subscribe + RunLoop start
+            _amdReady.Wait(5000);
+
+            new Thread(ServiceWatchdog)
+            {
+                IsBackground = true,
+                Name         = "iDeviceInfo-ServiceWatchdog"
+            }.Start();
+        }
+
+        private void StartAmdThread()
+        {
+            _amdReady.Reset();
+            var thread = new Thread(AmdThreadEntry)
             {
                 IsBackground = true,
                 Name         = "iDeviceInfo-AMD"
                 // MTA (default) is correct — STA is NOT needed for AMD APIs
             };
-            _amdThread.Start();
-
-            // Wait up to 5 s for subscribe + RunLoop start
-            _amdReady.Wait(5000);
+            _amdThread = thread;
+            thread.Start();
         }
 
         /// <summary>Re-fires DeviceConnected for every currently tracked device (Refresh menu).</summary>
         public void Restart()
         {
+            // No live subscription (e.g. Apple Mobile Device Service was down): start over.
+            if (_amdSubscription == IntPtr.Zero) ResubscribeAmd();
+
             foreach (var di in _connected.Values.ToList())
                 DeviceConnected?.Invoke(this, di);
+        }
+
+        // ── Service watchdog ──────────────────────────────────────────────
+
+        /// <summary>
+        /// A subscription dies with the Apple Mobile Device Service that created it, and
+        /// the service may be stopped or restarted (by Apple software, or by 3uTools which
+        /// starts it) after this app launched. Notice a new service instance and subscribe again.
+        /// </summary>
+        private void ServiceWatchdog()
+        {
+            int lastPid = 0;
+            while (!_disposed)
+            {
+                Thread.Sleep(3000);
+                int pid = 0;
+                try
+                {
+                    var procs = System.Diagnostics.Process.GetProcessesByName("AppleMobileDeviceService");
+                    if (procs.Length > 0) pid = procs[0].Id;
+                    foreach (var p in procs) p.Dispose();
+                }
+                catch { continue; }
+
+                bool serviceChanged = pid != 0 && lastPid != pid && (lastPid != 0 || _amdSubscription == IntPtr.Zero);
+                if (pid != 0) lastPid = pid;
+                if (serviceChanged && !_disposed) ResubscribeAmd();
+            }
+        }
+
+        private readonly object _resubLock = new();
+
+        private void ResubscribeAmd()
+        {
+            lock (_resubLock)
+            {
+                if (_disposed) return;
+
+                if (_amdSubscription != IntPtr.Zero)
+                {
+                    try { AMD.AMDeviceNotificationUnsubscribe(_amdSubscription); } catch { }
+                    _amdSubscription = IntPtr.Zero;
+                }
+                if (_amdRunLoop != IntPtr.Zero)
+                {
+                    try { CF.CFRunLoopStop(_amdRunLoop); } catch { }
+                    _amdRunLoop = IntPtr.Zero;
+                }
+                if (_amdThreadId != 0)
+                {
+                    try { PostThreadMessage(_amdThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero); } catch { }
+                }
+
+                // Device handles from the old service instance are stale.
+                _uiCtx?.Post(_ =>
+                {
+                    foreach (var serial in _connected.Keys.ToList())
+                        DeviceDisconnected?.Invoke(this, serial);
+                    _connected.Clear();
+                    _handleToSerial.Clear();
+                }, null);
+
+                StartAmdThread();
+            }
         }
 
         // ── AMD thread entry ──────────────────────────────────────────────
@@ -152,16 +232,28 @@ namespace iDeviceInfo
 
             // ── Step 2: subscribe ────────────────────────────────────────────
 
-            try
+            // Retry while the Apple Mobile Device Service isn't up yet (e.g. app launched
+            // at login before the service, or the service was stopped).
+            bool firstAttempt = true;
+            while (!_disposed)
             {
-                int r = AMD.AMDeviceNotificationSubscribe(
-                    _amdCallback, 0, 0, IntPtr.Zero, out _amdSubscription);
-                if (r != 0)
+                if (Thread.CurrentThread != _amdThread) return; // superseded by a newer AMD thread
+                try
+                {
+                    int r = AMD.AMDeviceNotificationSubscribe(
+                        _amdCallback, 0, 0, IntPtr.Zero, out _amdSubscription);
+                    if (r != 0)
+                        _amdSubscription = IntPtr.Zero;
+                }
+                catch
+                {
                     _amdSubscription = IntPtr.Zero;
-            }
-            catch
-            {
-                _amdSubscription = IntPtr.Zero;
+                }
+
+                if (_amdSubscription != IntPtr.Zero) break;
+
+                if (firstAttempt) { _usingCFRunLoop = useCFRunLoop; _amdReady.Set(); firstAttempt = false; }
+                Thread.Sleep(2000);
             }
 
             _usingCFRunLoop = useCFRunLoop;
@@ -224,7 +316,15 @@ namespace iDeviceInfo
                 if (trusted)
                 {
                     DeviceInfo? di = ReadAllDeviceFields(device);
-                    if (di == null || string.IsNullOrEmpty(di.SerialNumber)) return;
+                    if (di == null || string.IsNullOrEmpty(di.SerialNumber))
+                    {
+                        // Lockdown not ready yet: keep retrying instead of silently giving up.
+                        var retryCts = new CancellationTokenSource();
+                        _trustWatchers[device] = retryCts;
+                        new Thread(() => TrustWatcher(device, retryCts.Token))
+                        { IsBackground = true, Name = "iDeviceInfo-TrustWatcher" }.Start();
+                        return;
+                    }
                     _uiCtx!.Post(_ =>
                     {
                         _handleToSerial[device]     = di.SerialNumber;
